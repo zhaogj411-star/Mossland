@@ -1,0 +1,6 @@
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.sii/
+docs/memory/hook-events.log
+docs/memory/hook-reminders.log
