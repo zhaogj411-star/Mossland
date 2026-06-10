@@ -6,6 +6,9 @@
 - `code-index.md`：代码、测试、命令和资源边界的紧凑地图。
 - `agent/README.md`：agent harness 的用途和操作规则。
 - `agent/commands.md`：用于验证的稳定命令入口。
+- `mossland-codec.md`：读取 Mossland 多任务 codec、separation 预处理和数据集接法时使用。
+- `evaluation-metrics.md`：调研 `scripts/mossland-codec/tasks.py` 中 5 个任务的评估指标、论文依据和可复用代码仓库时使用。
+- `papers/README.md`：评估指标调研下载论文 PDF 的本地索引。
 - `memory/current.md`：新会话的短活跃上下文。
 - `memory/progress.md`：简洁的交接历史和下一步。
 - `memory/inbox.md`：等待分拣的未归类 notes。

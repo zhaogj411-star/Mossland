@@ -1,0 +1,19 @@
+# https://hydra.cc/docs/configure_hydra/intro/
+
+# 启用彩色日志记录
+defaults:
+  - override hydra_logging: colorlog # 覆盖 Hydra 日志记录为彩色日志
+  - override job_logging: colorlog # 覆盖作业日志记录为彩色日志
+
+# 输出目录，每次运行时动态生成
+run:
+  dir: ${paths.log_dir}/${project_name}/runs/${now:%Y-%m-%d}_${now:%H-%M-%S} # 运行的输出目录路径，包含日期和时间
+sweep:
+  dir: ${paths.log_dir}/${project_name}/multiruns/${now:%Y-%m-%d}_${now:%H-%M-%S} # 扫描（sweep）的输出目录路径，包含日期和时间
+  subdir: ${hydra.job.num} # 扫描的子目录为 Hydra 作业编号
+
+job_logging:
+  handlers:
+    file:
+      # 包含来自 https://github.com/facebookresearch/hydra/pull/2242 的修复
+      filename: ${hydra.runtime.output_dir}/${project_name}.log # 作业日志的文件路径，位于 Hydra 运行时输出目录，文件名包含任务名称

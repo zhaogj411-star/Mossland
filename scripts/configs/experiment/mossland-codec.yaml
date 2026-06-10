@@ -1,0 +1,115 @@
+# @package _global_
+
+project_name: mossland-codec
+checkpoint_monitor: loss
+tags: ["audioCodec", "mossland-codec", "multi-task"]
+seed: null
+resume_from_ckpt: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-09_11-23-38/checkpoints/last.ckpt
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 5000
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.mossland-codec.tasks.MosslandTaskDataset
+    dataset:
+      _target_: scripts.data.datasets.PreparedSeparationDataset
+      dirs: ["/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER_SEPERATION_NEW"]
+      sample_size: 66560
+      sample_rate: 44100
+      random_crop: true
+      num_channels: 2
+      strict: false
+      max_duration_seconds: 300 # use ffprobe metadata probe to skip items >= 5 minutes before mp3 decode
+      crops_per_file: 8 # load one prepared item once, crop 8 segments with random tasks, then flatten to the effective training batch
+    active_tasks:
+      - reconstruct
+      - separate_vocals
+      - separate_accompaniment
+      - super_resolution
+      - mono_to_stereo
+    task_weights:
+      reconstruct: 6.0
+      separate_vocals: 1.0
+      separate_accompaniment: 1.0
+      super_resolution: 1.0
+      mono_to_stereo: 1.0
+    sample_rate: 44100
+    low_sample_rate: [8000, 40000] # sample from fixed fast audio super-resolution buckets in this range
+  pin_memory: true
+  val_split: 0.0001
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 6
+  prefetch_factor: 2
+
+trainer:
+  log_every_n_steps: 10
+
+model:
+  _target_: scripts.mossland-codec.models.MosslandCodecTransformer
+  mixed_precision: true
+  stereo: true
+  default_time_prompt: 0.4
+  default_denoising_steps_parallel: 5
+  default_denoising_steps_ar: 2
+  hop: 1024
+  fac: 2
+  sample_rate: 44100
+  alpha_rescale: 0.65
+  beta_rescale: 0.34
+  dim: 768
+  head_dim: 128
+  mlp_mult: 4
+  pos_emb: learned
+  num_layers: 22
+  num_layers_encoder: 22
+  cond_channels: 768
+  num_latents: 128
+  num_more_latents: 8
+  fsq_levels: [11, 11, 11, 11]
+  frontend_base_channels: 64
+  frontend_multipliers_list: [1, 2, 4, 12]
+  frontend_layers_list: [3, 3, 3, 1]
+  frontend_encoder_layers_list: [3, 3, 3, 1]
+  frontend_freq_downsample_list: [0, 1, 0]
+  spec_length: 32
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  rho: 7.0
+  max_batch_size_encode: 64
+  max_batch_size_decode: 32
+  sigma_rescale: 0.8
+
+wrapper:
+  _target_: scripts.mossland-codec.wrapper.MosslandCodecTrainingWrapper
+  use_ema: true
+  ema_beta: 0.9999
+  learning_rate: 5e-5
+  weight_decay: 0.0
+  optimizer_name: radam
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 10000
+  lr_schedule_total_steps: 1000000
+  fsq_dropout_prob: 0.6
+  consistency_step: 0.1
+  consistency_step_schedule: exponential
+  consistency_step_total_steps: 1000000
+  consistency_step_end_exp: 2.0
+  sigma_sampling: lognormal
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_loss_delta: 0.00054
+  consistency_min_sigma_delta: 0.001
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.mossland-codec.wrapper.MosslandCodecTrainingCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 2
+    demo_every: 5000
+    sample_rate: 44100
+    use_ema: true
+    silence_seconds: 0.25

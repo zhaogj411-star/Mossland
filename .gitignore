@@ -1,6 +1,15 @@
 .pytest_cache/
 __pycache__/
 *.py[cod]
+core.*
+.DS_Store
+*.log
 .sii/
+.codegraph/
+tmp/
+logs/
+outputs/
+wandb/
 docs/memory/hook-events.log
 docs/memory/hook-reminders.log
+checkpoints/

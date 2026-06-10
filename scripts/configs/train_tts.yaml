@@ -1,0 +1,38 @@
+# @package _global_
+defaults:
+  - _self_
+  - paths: tts
+  - hydra: tts
+  - experiment: null
+
+project_name: ???
+tags: ["dev", "lightning"]
+checkpoint_every_n_train_steps: 5000
+seed: null
+resume_from_ckpt: null
+persistent_ckpt_path: null
+pretrain_ckpt_path: null
+
+trainer:
+  precision: bf16-mixed # bf16-mixed | 16-mixed | 32
+  max_epochs: 10000000
+  max_steps: -1
+  log_every_n_steps: 5
+  accumulate_grad_batches: 1
+  gradient_clip_algorithm: norm
+  gradient_clip_val: 1.0
+  find_unused_parameters: false
+
+logger:
+  wandb:
+    enabled: true
+    save_dir: ${paths.output_dir}
+    offline: true
+    id: null
+    tags: ${tags}
+    name: ${now:%Y-%m-%d-%H-%M-%S}
+    project: ${project_name}
+  tensorboard:
+    enabled: true
+    save_dir: ${paths.output_dir}/tensorboard
+    name: ${now:%Y-%m-%d-%H-%M-%S}

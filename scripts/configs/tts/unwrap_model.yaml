@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - _self_
+  - /paths: tts
+  - /hydra: tts
+  - /experiment: null
+
+project_name: ???
+experiment_ckpt_path: ???
+output_path: ???
+config_path: null
+ckpt_dir: null
+export_ema: true

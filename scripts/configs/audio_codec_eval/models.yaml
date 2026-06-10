@@ -1,0 +1,114 @@
+models:
+  identity:
+    family: smoke-test
+    adapter: identity
+    enabled: true
+    sample_rate: null
+    channels: null
+    hop_length: 1
+    latent_dim: null
+    latent_type: waveform
+    license: project
+    source_url: null
+    weight_id: null
+    notes: "No-op adapter used to validate data and metrics plumbing."
+  same-s:
+    family: SAME
+    adapter: same
+    enabled: true
+    sample_rate: 44100
+    channels: 2
+    hop_length: 4096
+    latent_dim: 256
+    latent_type: continuous
+    license: Stability AI Community License
+    source_url: https://github.com/Stability-AI/stable-audio-3
+    weight_id: stabilityai/SAME-S
+    repo_dir: external/repos/stable-audio-3
+    notes: "Small SAME autoencoder; preferred first Stable Audio 3 target."
+  same-l:
+    family: SAME
+    adapter: same
+    enabled: true
+    sample_rate: 44100
+    channels: 2
+    hop_length: 4096
+    latent_dim: 256
+    latent_type: continuous
+    license: Stability AI Community License
+    source_url: https://github.com/Stability-AI/stable-audio-3
+    weight_id: stabilityai/SAME-L
+    repo_dir: external/repos/stable-audio-3
+    notes: "Large SAME autoencoder; use after SAME-S smoke test."
+  codicodec:
+    family: CoDiCodec
+    adapter: codicodec
+    enabled: true
+    sample_rate: 44100
+    channels: 2
+    hop_length: 4096
+    latent_dim: 64
+    latent_type: continuous
+    license: CC BY-NC 4.0
+    source_url: https://github.com/SonyCSLParis/codicodec
+    weight_id: auto-download
+    repo_dir: external/repos/codicodec
+    notes: "Continuous mode only for the first pass."
+  music2latent:
+    family: Music2Latent
+    adapter: music2latent
+    enabled: true
+    sample_rate: 44100
+    channels: 2
+    hop_length: 4096
+    latent_dim: 64
+    latent_type: continuous
+    license: CC BY-NC 4.0
+    source_url: https://github.com/SonyCSLParis/music2latent
+    weight_id: auto-download
+    repo_dir: external/repos/music2latent
+    notes: "Consistency autoencoder baseline."
+  ear-vae:
+    family: EAR_VAE
+    adapter: ear_vae
+    enabled: true
+    sample_rate: 44100
+    channels: 2
+    hop_length: 1024
+    latent_dim: 64
+    latent_type: continuous
+    license: repository license / Hugging Face model card
+    source_url: https://github.com/Eps-Acoustic-Revolution-Lab/EAR_VAE
+    weight_id: earlab/EAR_VAE
+    repo_dir: external/repos/EAR_VAE
+    checkpoint_glob: checkpoints/ear-vae/pretrained_weight/ear_vae_44k.pyt
+    notes: "Standalone runner uses upstream EAR_VAE encode/decode with the 44.1 kHz checkpoint."
+  rave:
+    family: RAVE
+    adapter: rave
+    enabled: true
+    sample_rate: 44100
+    channels: 1
+    hop_length: 2048
+    latent_dim: 22
+    latent_type: continuous
+    license: upstream
+    source_url: https://github.com/acids-ircam/RAVE
+    weight_id: Intelligent-Instruments-Lab/rave-models/voice_vctk_b2048_r44100_z22.ts
+    repo_dir: external/repos/RAVE
+    checkpoint_glob: checkpoints/rave/*.{ts,pt,onnx}
+    notes: "Older real-time VAE baseline; using a public voice VCTK torchscript model as the first smokeable checkpoint."
+  dac-vae-128d-48k:
+    family: DAC VAE
+    adapter: dac_vae
+    enabled: true
+    sample_rate: 48000
+    channels: 1
+    hop_length: 960
+    latent_dim: 128
+    latent_type: continuous
+    license: project
+    source_url: null
+    weight_id: vae_128d_48k.pth
+    checkpoint_glob: checkpoints/dac/vae_128d_48k.pth
+    notes: "Continuous 128-dim DAC VAE used by Wan audio voice clone; vendored locally for codec eval."
