@@ -447,6 +447,15 @@ def _normalize_max_duration_seconds(max_duration_seconds: float | int | None) ->
     return value
 
 
+def _normalize_positive_int_or_none(value: int | None, name: str) -> int | None:
+    if value is None:
+        return None
+    normalized = int(value)
+    if normalized <= 0:
+        raise ValueError(f"{name} must be a positive integer or None")
+    return normalized
+
+
 def _probe_audio_duration_seconds_ffprobe(path_: Path) -> float | None:
     try:
         completed = subprocess.run(
@@ -496,6 +505,7 @@ class PreparedSeparationDataset(Dataset):
         scan_fallback: bool = True,
         crops_per_file: int = 1,
         max_duration_seconds: float | int | None = None,
+        length: int | None = None,
     ):
         super().__init__()
         self.dirs = (
@@ -525,13 +535,19 @@ class PreparedSeparationDataset(Dataset):
         self.scan_fallback = bool(scan_fallback)
         self.crops_per_file = max(1, int(crops_per_file))
         self.max_duration_seconds = _normalize_max_duration_seconds(max_duration_seconds)
+        self.length = _normalize_positive_int_or_none(length, "length")
         self._duration_limit_cache: dict[Path, bool] = {}
         self.item_dirs: list[Path] = []
         self.refresh_items()
 
-    def refresh_items(self):
+    def refresh_items(self, rebuild_index: bool = False):
         item_dirs = []
         for root, index_path in self.index_sources:
+            if rebuild_index:
+                scanned = self._scan_item_dirs(root)
+                self._write_index(root, index_path, scanned)
+                item_dirs.extend(scanned)
+                continue
             if index_path.exists():
                 item_dirs.extend(self._read_index(root, index_path))
                 continue
@@ -540,7 +556,12 @@ class PreparedSeparationDataset(Dataset):
                 self._write_index(root, index_path, scanned)
                 item_dirs.extend(scanned)
         self.item_dirs = sorted(set(item_dirs))
+        if rebuild_index:
+            self._duration_limit_cache.clear()
         print(f"refresh:Found {len(self.item_dirs)} prepared separation items")
+
+    def rebuild_index(self):
+        self.refresh_items(rebuild_index=True)
 
     def _read_index(self, root: Path, index_path: Path) -> list[Path]:
         item_dirs = []
@@ -564,7 +585,11 @@ class PreparedSeparationDataset(Dataset):
                 lines.append(str(item_dir.relative_to(root)))
             except ValueError:
                 lines.append(str(item_dir))
-        index_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        tmp_path = index_path.with_name(
+            f"{index_path.name}.{os.getpid()}.{id(self)}.tmp"
+        )
+        tmp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        os.replace(tmp_path, index_path)
 
     def _item_exceeds_duration_limit(self, item_dir: Path) -> bool:
         if self.max_duration_seconds is None:
@@ -610,7 +635,7 @@ class PreparedSeparationDataset(Dataset):
             return {}
 
     def __len__(self):
-        return len(self.item_dirs)
+        return self.length if self.length is not None else len(self.item_dirs)
 
     def _load_stem(self, path_: Path) -> torch.Tensor:
         audio, in_sample_rate = torchaudio.load(str(path_))

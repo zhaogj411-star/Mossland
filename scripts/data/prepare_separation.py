@@ -1013,6 +1013,20 @@ def process_files(
                 terminal_status = separation_status(audio_path, output_root, source_root)
                 progress_status = _progress_status_for_terminal(terminal_status)
                 if progress_status is not None:
+                    if terminal_status == "error":
+                        current_model_files, current_model_config = ensure_model_context()
+                        layout = separation_layout(audio_path, output_root, source_root)
+                        if _skip_if_duration_exceeds_limit(
+                            audio_path,
+                            layout,
+                            current_model_config,
+                            current_model_files,
+                            max_duration_seconds,
+                            worker_id,
+                            progress_file,
+                        ):
+                            skiplong += 1
+                            continue
                     _write_progress_event(progress_file, progress_status, worker_id, audio_path)
                     if progress_status == "skipped":
                         skipped += 1

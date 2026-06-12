@@ -627,6 +627,57 @@ def test_process_files_skips_audio_at_or_above_max_duration_before_separation(
     ]
 
 
+def test_process_files_reclassifies_existing_error_as_skiplong_when_over_max_duration(
+    tmp_path,
+    monkeypatch,
+):
+    audio_path = tmp_path / "long.wav"
+    audio_path.write_bytes(b"long")
+    output_root = tmp_path / "out"
+    progress_file = tmp_path / "progress.jsonl"
+    layout = prepare.separation_layout(audio_path, output_root)
+    layout.item_dir.mkdir(parents=True)
+    layout.metadata_path.write_text(
+        json.dumps({"status": "error", "reason": "worker_crash"}),
+        encoding="utf-8",
+    )
+    default_config = prepare.load_model_config(None)
+    separated = []
+
+    class FakeSeparator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def separate(self, path):
+            separated.append(Path(path).name)
+
+    monkeypatch.setattr(prepare, "load_model_config", lambda config_path: default_config)
+    monkeypatch.setattr(prepare, "ensure_model_files", lambda model_dir=None, config_path=None, checkpoint_path=None: prepare.ModelFiles(
+        config_path=tmp_path / prepare.DEFAULT_CONFIG_NAME,
+        checkpoint_path=tmp_path / prepare.DEFAULT_CHECKPOINT_NAME,
+    ))
+    monkeypatch.setattr(prepare, "RoformerSeparator", FakeSeparator)
+    monkeypatch.setattr(prepare, "_probe_audio_duration_seconds", lambda path: 601.0)
+    monkeypatch.setattr(prepare, "tqdm", lambda items, **kwargs: list(items))
+
+    done, skipped, skiplong, errors = prepare.process_files(
+        [audio_path],
+        output_root=output_root,
+        progress_file=progress_file,
+        max_duration_seconds=600,
+    )
+
+    assert (done, skipped, skiplong, errors) == (0, 0, 1, 0)
+    assert separated == []
+    metadata = json.loads(layout.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "skiplong"
+    assert metadata["reason"] == "max_duration_exceeded"
+    _, events = prepare._read_progress_events(progress_file, 0)
+    assert [(event.status, Path(event.path).name) for event in events] == [
+        ("skiplong", "long.wav"),
+    ]
+
+
 def test_launch_workers_marks_started_file_and_restarts_after_worker_crash(
     tmp_path,
     monkeypatch,

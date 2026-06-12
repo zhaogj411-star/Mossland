@@ -5,6 +5,7 @@ core.*
 .DS_Store
 *.log
 .sii/
+ckpt/
 .codegraph/
 tmp/
 logs/

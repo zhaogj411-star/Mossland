@@ -68,6 +68,32 @@ def test_mossland_wrapper_only_consumes_task_payloads():
     assert "model.generate_waveform" in source
 
 
+def test_training_wrapper_reindexes_datamodule_dataset_on_due_train_step():
+    module = importlib.import_module("scripts.mossland-codec.wrapper")
+    calls = []
+
+    class ReindexableDataset:
+        def rebuild_index(self):
+            calls.append("rebuild")
+
+    prepared = ReindexableDataset()
+    datamodule = SimpleNamespace(
+        dataset=SimpleNamespace(dataset=prepared),
+        train_dataset=SimpleNamespace(dataset=prepared),
+    )
+    wrapper = SimpleNamespace(index_data_every_step=2, _last_index_data_step=None)
+    trainer = SimpleNamespace(global_step=1, datamodule=datamodule)
+
+    assert module.MosslandCodecTrainingWrapper._maybe_rebuild_data_index(wrapper, trainer) == 0
+
+    trainer.global_step = 2
+    assert module.MosslandCodecTrainingWrapper._maybe_rebuild_data_index(wrapper, trainer) == 1
+    assert calls == ["rebuild"]
+
+    assert module.MosslandCodecTrainingWrapper._maybe_rebuild_data_index(wrapper, trainer) == 0
+    assert calls == ["rebuild"]
+
+
 def test_demo_callback_clears_cuda_cache_before_and_after_demo(monkeypatch, tmp_path):
     module = importlib.import_module("scripts.mossland-codec.wrapper")
     callback = module.MosslandCodecTrainingCallback(
@@ -193,9 +219,12 @@ def test_mossland_experiment_config_points_to_self_contained_codec():
     assert list(cfg.model.frontend_multipliers_list) == [1, 2, 4, 12]
     assert "source_root" not in cfg.data.dataset.dataset
     assert cfg.data.dataset.dataset.max_duration_seconds == 300
-    assert cfg.data.dataset.dataset.crops_per_file == 8
+    assert cfg.data.dataset.dataset.crops_per_file == 16
+    assert cfg.data.dataset.dataset.length == 1000000
+    assert "index_data_every_step" not in cfg.data.dataset.dataset
+    assert cfg.wrapper.index_data_every_step is None
     assert cfg.data.train_batch_size == 1
-    assert cfg.data.train_batch_size * cfg.data.dataset.dataset.crops_per_file == 8
+    assert cfg.data.train_batch_size * cfg.data.dataset.dataset.crops_per_file == 16
     assert cfg.data.num_workers == 6
     assert cfg.data.prefetch_factor == 2
     assert cfg.trainer.log_every_n_steps == 10

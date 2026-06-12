@@ -91,9 +91,11 @@ cd /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland
 
 脚本默认只处理短于 10 分钟的音频：`--max-duration-seconds 600` 会在完整加载音频和 RoFormer 推理前探测时长，优先使用 `ffprobe`，再回退到 `torchaudio.info()`；时长大于等于阈值的条目写 `metadata.json(status=skiplong, reason=max_duration_exceeded)`，并在 `progress.jsonl` 中记录 `status=skiplong`。普通已有完成产物仍记录为 `skipped`，两者在父进程进度条中分开统计。需要关闭时长限制时传 `--max-duration-seconds 0`。
 
-使用 `--devices` 多 worker 时，父进程终端显示总文件级进度条 `files`，并在 postfix 里显示 `done/skipped/skiplong/errors`；每个 worker 的详细 stdout/stderr 写到 `${output-root}/_logs/prepare_separation/worker_*.log`。
+使用 `--devices` 多 worker 时，父进程终端显示总文件级进度条 `files`，并在 postfix 里显示 `done/skipped/skiplong/errors`；每个 worker 的详细 stdout/stderr 写到 `${output-root}/_logs/prepare_separation/worker_*.log`。这只适合同一台机器内的多卡 launcher。
 
-`process_files()` 不再在启动时对整份 manifest 调 `filter_pending_files()` 做全量终止状态预扫。worker 会按 manifest 顺序逐条检查：已有完整 `done` 产物立即写 `skipped` 进度，已有 `metadata(status=skiplong/error)` 分别计入对应状态；第一个真正 pending 的文件会立即进入时长检查和 RoFormer 推理，模型实例也只在首个需要推理的文件前懒加载。这个约束用于避免 624 万级 manifest 在首个文件处理前长时间停在 `files 0%`。
+多机多卡不要在每台机器上对同一份 manifest 直接使用 `--devices`，因为当前 launcher 只按本机 `len(devices)` 生成 shard，会导致不同机器重复处理同一组 shard。多机推荐每张 GPU 启一个独立进程，所有进程共用同一份 `--files-list`、`--source-root` 和 `--output-root`，并设置全局 `--num-shards=<总GPU数>`、`--shard-id=<全局GPU序号>`、`--device cuda:<本机GPU序号>`。例如 4 台机器、每台 8 卡时，总 shard 数是 32；第 3 台机器（`NODE_RANK=2`）的本机第 5 张卡（`LOCAL_GPU=5`）使用 `--num-shards 32 --shard-id 21 --device cuda:5`。多机运行时建议给每个进程单独的 `--progress-file`，避免共享文件系统上的多进程追加写互相干扰；全局进度以 prepared 输出目录中的 `done/skiplong/error` metadata 为准。
+
+`process_files()` 不再在启动时对整份 manifest 调 `filter_pending_files()` 做全量终止状态预扫。worker 会按 manifest 顺序逐条检查：已有完整 `done` 产物立即写 `skipped` 进度；已有 `metadata(status=error)` 会先按当前 `--max-duration-seconds` 用同一套时长探测重判，若超长则改写为 `skiplong` 并直接跳过，否则才计入 `error`；第一个真正 pending 的文件会立即进入时长检查，超长直接 `skiplong`，短音频才进入 RoFormer 推理，模型实例也只在首个需要推理的文件前懒加载。这个约束用于避免 624 万级 manifest 在首个文件处理前长时间停在 `files 0%`。
 
 launcher 会增强 native 崩溃场景的稳健性：worker 在处理每个 pending 文件前写 `progress.jsonl(status=started)`。如果子进程被 SIGSEGV 等 native 错误打死（例如 launcher 看到 `rc=-11`），父进程会用该 worker 最后的 `started` 文件写 `metadata.json(status=error, reason=worker_crash)`，然后重启同一个 shard。重启后 `metadata(status=error)`、`metadata(status=skiplong)` 和完整 `done` 条目都会被视为终止状态，除非加 `--overwrite`，不会反复撞同一个文件。`--worker-restarts` 控制每个 worker 的最多自动重启次数，默认 100。
 
@@ -107,9 +109,13 @@ launcher 会增强 native 崩溃场景的稳健性：worker 在处理每个 pend
 
 首次构造时会用 `fast_scandir` 扫描 prepared 目录的 `audio/` 子树，找到 `mixture.mp3` 且同目录包含 `vocals.mp3/accompaniment.mp3` 的条目，并写入 `${dirs[0]}/index.list`。之后如果 `index.list` 存在，训练启动直接读取它，不再依赖 `prepare_separation.py` 的 progress 日志。每个样本会使用同一个 sample offset 裁切已解码的 stem，并返回 `audio=mixture`，所以 `reconstruct`、`super_resolution`、`mono_to_stereo` 仍可直接使用 mixture。
 
+`PreparedSeparationDataset.length` 可把 dataset 暴露给 DataLoader 的逻辑长度固定住；为 `None` 时使用真实 `len(item_dirs)`。取样时仍会对当前真实 `item_dirs` 数量取余，因此固定 `length` 不会复制样本，只是提供稳定 epoch 长度。当前主配置设为 `1000000`，适合分离预处理边生成、训练边读取的场景。
+
+`MosslandCodecTrainingWrapper.index_data_every_step` 可在训练过程中周期性重新索引 prepared 目录；为 `None` 时不重新索引。wrapper 在 `on_train_batch_end()` 按 `trainer.global_step` 判断是否触发，触发时从 `trainer.datamodule` 找到带 `rebuild_index()` 的底层 dataset 并调用它。`PreparedSeparationDataset.rebuild_index()` 会重新扫描 prepared 目录、重写 `index.list`，并直接替换当前 dataset 实例的 `self.item_dirs`。
+
 `MosslandTaskDataset` 会先抽样任务，再调用 dataset 的任务感知读取接口，避免非分离任务白白解码 stem。单 crop 路径使用 `get_item_for_task(index, task_id)`：非分离任务只读 `mixture.mp3`；`separate_vocals` 只读 `mixture.mp3` 和 `vocals.mp3`；`separate_accompaniment` 只读 `mixture.mp3` 和 `accompaniment.mp3`。
 
-`PreparedSeparationDataset.crops_per_file` 用于一次读取同一个 prepared item 的 mp3 stem 后，在内存里裁出多个训练片段并 stack 成 `[crops_per_file, channels, time]`。当 `crops_per_file > 1` 且 dataset 提供 `get_item_for_tasks()` 时，`MosslandTaskDataset` 会为每个 crop 独立随机采样任务，把任务列表传给 prepared dataset；prepared dataset 只解码这些任务需要的 stem 并集，例如一组 crop 中同时有 vocals/accompaniment 分离任务时，同一个 item 只会各读一次 `mixture.mp3/vocals.mp3/accompaniment.mp3`。DataLoader collate 后的 `[train_batch_size, crops_per_file, channels, time]` 会由 `MosslandTaskBatch.from_payload()` 展平成有效训练 batch，并按 batch-major 顺序保留每个 crop 的 `task_id`。当前主训练配置使用 `crops_per_file=8`、`train_batch_size=1`，有效 batch 为 8。
+`PreparedSeparationDataset.crops_per_file` 用于一次读取同一个 prepared item 的 mp3 stem 后，在内存里裁出多个训练片段并 stack 成 `[crops_per_file, channels, time]`。当 `crops_per_file > 1` 且 dataset 提供 `get_item_for_tasks()` 时，`MosslandTaskDataset` 会为每个 crop 独立随机采样任务，把任务列表传给 prepared dataset；prepared dataset 只解码这些任务需要的 stem 并集，例如一组 crop 中同时有 vocals/accompaniment 分离任务时，同一个 item 只会各读一次 `mixture.mp3/vocals.mp3/accompaniment.mp3`。DataLoader collate 后的 `[train_batch_size, crops_per_file, channels, time]` 会由 `MosslandTaskBatch.from_payload()` 展平成有效训练 batch，并按 batch-major 顺序保留每个 crop 的 `task_id`。当前主训练配置使用 `crops_per_file=16`、`train_batch_size=1`，有效 batch 为 16。
 
 `PreparedSeparationDataset.max_duration_seconds` 用于在读取 mp3 前跳过过长样本。当前主配置和 small 配置都设为 `300`：dataset 会在选中单条 item 后、真正解码 mp3 前，用 `ffprobe` 探测 `mixture.mp3` 容器时长；大于等于 5 分钟的条目会从当前 worker 的 item list 中移除并重采样。过滤不在训练启动时全量扫描 index，避免 10 万级 prepared item 因逐条 ffprobe 导致启动变慢。ffprobe 失败时保留样本，避免因为探测工具异常误删数据。
 
@@ -141,24 +147,20 @@ python scripts/train.py experiment=mossland-codec
 
 ## 推理入口
 
-推理辅助类 `scripts.mossland-codec.inference.EncoderDecoder` 使用 `model_kwargs` 实例化 `MosslandCodecTransformer`：
+推理辅助类 `scripts.mossland-codec.inference.EncoderDecoder` 通过 `scripts.factory.load_model()` 读取模型。推荐传 checkpoint 目录，目录内应包含 `config.yaml` 和 `checkpoint.ckpt`：
 
 ```python
 from importlib import import_module
 
 EncoderDecoder = import_module("scripts.mossland-codec.inference").EncoderDecoder
 codec = EncoderDecoder(
-    load_path_inference="/path/to/checkpoint.ckpt",
-    model_kwargs={
-        "sample_rate": 48000,
-        "hop": 1024,
-        "fac": 2,
-        "spec_length": 32,
-    },
+    load_path_inference="/path/to/ckpt_dir",
 )
+latents = codec.encode("/path/to/audio.wav")
+audio = codec.decode(latents, task_id="reconstruct")
 ```
 
-如果未显式传入 `max_batch_size_encode`、`max_batch_size_decode` 或 `sigma_rescale`，推理代码会读取模型实例上的同名属性。
+`decode()`、`decode_next()` 和底层分块 decode 默认 `task_id="reconstruct"`，也可传 `separate_vocals`、`separate_accompaniment`、`super_resolution` 或 `mono_to_stereo`。如果未显式传入 `max_batch_size_encode`、`max_batch_size_decode` 或 `sigma_rescale`，推理代码会读取模型实例上的同名属性。
 
 ## 推理相关参数
 

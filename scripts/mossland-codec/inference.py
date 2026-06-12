@@ -6,7 +6,7 @@ import einops
 import os
 
 from .utils import is_path, distribute, is_integer, download_model
-from .models import MosslandCodecTransformer
+from scripts.factory import load_model
 
 
 torch.backends.cudnn.benchmark = True
@@ -71,13 +71,16 @@ class EncoderDecoder:
         return einops.rearrange(latents, '... l (d c) -> ... (l d) c', c=self.bottleneck_channels)
 
     def get_models(self):
-        """Instantiate MosslandCodecTransformer and load weights from checkpoint."""
-        gen = MosslandCodecTransformer(**self.model_kwargs).to(self.device)
-        gen.eval()
-        checkpoint = torch.load(self.load_path_inference, map_location=self.device, weights_only=False)
-        state_dict = checkpoint.get("gen_state_dict") or checkpoint.get("state_dict") or checkpoint
-        gen.load_state_dict(state_dict, strict=True)
-        self.gen = gen
+        """Load model weights and config through scripts.factory.load_model()."""
+        ckpt_path = os.fspath(self.load_path_inference)
+        if os.path.isdir(ckpt_path):
+            gen = load_model(ckpt_dir=ckpt_path)
+        else:
+            config_path = os.path.join(os.path.dirname(ckpt_path), "config.yaml")
+            if not os.path.exists(config_path):
+                config_path = None
+            gen = load_model(ckpt_path=ckpt_path, config_path=config_path)
+        self.gen = gen.to(self.device).eval()
 
     def encode(self, path_or_audio, max_batch_size=None, discrete=False, preprocess_on_gpu=True, desired_channels=64, fix_batch_size=False):
         '''
@@ -102,7 +105,7 @@ class EncoderDecoder:
         out = torch.atanh(out) / self.sigma_rescale
         return out
 
-    def decode(self, latent, mode='parallel', max_batch_size=None, denoising_steps=None, time_prompt=None, preprocess_on_gpu=True):
+    def decode(self, latent, mode='parallel', max_batch_size=None, denoising_steps=None, time_prompt=None, preprocess_on_gpu=True, task_id='reconstruct'):
         '''
         latent: numpy array of latents to decode with shape [audio_channels, dim, length]
         max_batch_size: maximum inference batch size for decoding: tune it depending on the available GPU memory
@@ -121,14 +124,14 @@ class EncoderDecoder:
             inv = latent * self.sigma_rescale
             inv = torch.tanh(inv)
             latents = self.dim2latents(inv)
-        return decode_latent_inference(latents, self, mode, max_batch_size, denoising_steps=denoising_steps, time_prompt=time_prompt, device=self.device, preprocess_on_gpu=preprocess_on_gpu)
+        return decode_latent_inference(latents, self, mode, max_batch_size, denoising_steps=denoising_steps, time_prompt=time_prompt, device=self.device, preprocess_on_gpu=preprocess_on_gpu, task_id=task_id)
 
     def reset(self):
         """Clear internal live-decoding buffers."""
         self.past_spec = None
         self.past_latents = None
 
-    def decode_next(self, latents, max_batch_size=None, denoising_steps=None, discrete=False, time_prompt=None, preprocess_on_gpu=True):
+    def decode_next(self, latents, max_batch_size=None, denoising_steps=None, discrete=False, time_prompt=None, preprocess_on_gpu=True, task_id='reconstruct'):
         '''
         latents: numpy array of latents to decode with shape [audio_channels, dim, length]
         max_batch_size: maximum inference batch size for decoding: tune it depending on the available GPU memory
@@ -145,7 +148,7 @@ class EncoderDecoder:
             inv = latents * self.sigma_rescale
             inv = torch.tanh(inv)
             latents = self.dim2latents(inv)
-        wv, past_spec, past_latents = decode_next_latent_inference(latents, self, max_batch_size, denoising_steps=denoising_steps, time_prompt=time_prompt, device=self.device, preprocess_on_gpu=preprocess_on_gpu)
+        wv, past_spec, past_latents = decode_next_latent_inference(latents, self, max_batch_size, denoising_steps=denoising_steps, time_prompt=time_prompt, device=self.device, preprocess_on_gpu=preprocess_on_gpu, task_id=task_id)
         self.past_spec = past_spec
         self.past_latents = past_latents
         return wv
@@ -242,7 +245,7 @@ def encode_audio_inference(audio_path, trainer, max_batch_size_encode, device='c
 # Returns:
 #   audio: numpy array of decoded waveform with shape [waveform_samples, audio_channels]
 @torch.no_grad()
-def decode_latent_inference(latent, trainer, mode, max_batch_size_decode, denoising_steps=None, device='cuda', preprocess_on_gpu=False, time_prompt=None):
+def decode_latent_inference(latent, trainer, mode, max_batch_size_decode, denoising_steps=None, device='cuda', preprocess_on_gpu=False, time_prompt=None, task_id='reconstruct'):
     trainer.gen = trainer.gen.to(device)
     trainer.gen.eval()
     # check if latent is numpy array, then convert to tensor
@@ -266,9 +269,9 @@ def decode_latent_inference(latent, trainer, mode, max_batch_size_decode, denois
             latent = F.pad(latent, (0,0,0,pad))
 
     if mode=='parallel':
-        repr = trainer.gen.decode_parallel(latent, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode)
+        repr = trainer.gen.decode_parallel(latent, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode, task_id=task_id)
     elif mode=='autoregressive':
-        repr = trainer.gen.decode_autoregressive(latent, time_prompt=time_prompt, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode)
+        repr = trainer.gen.decode_autoregressive(latent, time_prompt=time_prompt, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode, task_id=task_id)
     else:
         raise ValueError(f"Mode must be either 'parallel' or 'autoregressive', but got {mode}")
     if not preprocess_on_gpu:
@@ -288,7 +291,7 @@ def decode_latent_inference(latent, trainer, mode, max_batch_size_decode, denois
 # Returns:
 #   audio: numpy array of decoded waveform with shape [waveform_samples, audio_channels]
 @torch.no_grad()
-def decode_next_latent_inference(latent, trainer, max_batch_size_decode, denoising_steps=None, device='cuda', preprocess_on_gpu=False, time_prompt=None):
+def decode_next_latent_inference(latent, trainer, max_batch_size_decode, denoising_steps=None, device='cuda', preprocess_on_gpu=False, time_prompt=None, task_id='reconstruct'):
     trainer.gen = trainer.gen.to(device)
     trainer.gen.eval()
     # check if latent is numpy array, then convert to tensor
@@ -310,7 +313,7 @@ def decode_next_latent_inference(latent, trainer, max_batch_size_decode, denoisi
     # equivalent way of doing the above line in a more elegant way:
     # latent = latent.permute(0, 2, 1, 3).reshape(latent.shape[0], -1, latent.shape[-1])
 
-    repr = trainer.gen.decode_autoregressive_step(latent, past_repr=trainer.past_spec, past_latents=trainer.past_latents, time_prompt=time_prompt, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode)
+    repr = trainer.gen.decode_autoregressive_step(latent, past_repr=trainer.past_spec, past_latents=trainer.past_latents, time_prompt=time_prompt, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode, task_id=task_id)
     past_spec = repr[..., -trainer.gen.spec_length:]
     if not preprocess_on_gpu:
         repr = repr.cpu()

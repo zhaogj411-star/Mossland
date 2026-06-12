@@ -17,6 +17,7 @@
 - 2026-06-09：排查 `NETEASE_SPIDER_SEPERATION/_logs/prepare_separation`，worker 日志无 Python traceback/error，`progress.jsonl` 只有 `done/skipped`，没有 `error`，退出更像外部中断或超长音频导致资源/耗时风险；`prepare_separation.py` 新增默认 10 分钟时长上限，超长条目单独记为 `skiplong`，不混入普通 `skipped`。
 - 2026-06-09：远程多卡 run 出现 `worker_00` `rc=-11`（SIGSEGV/native 崩溃）；普通 try/except 无法捕获。`prepare_separation.py` 已增加 `started` 进度事件、`worker_crash` metadata 标记和 `--worker-restarts` 自动重启，同一 shard 重启后跳过已终止的 `done/error/skiplong` 条目。
 - 2026-06-09：定位到错误样本 `/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER/audio/20260521/2144984014.mp3`，文件约 489MB，`ffprobe` 时长 `12812.891833` 秒（约 3小时33分）。当前环境 `torchaudio 2.11.0+cu128` 没有 `torchaudio.info`，导致旧的 10 分钟预筛探测失败并放行超长音频；`prepare_separation.py` 已改为优先用 `ffprobe` 探测时长，父进程标记 worker 崩溃文件时若发现超长则写 `skiplong`。
+- 2026-06-10：排查 `NETEASE_SPIDER_SEPERATION_NEW` 当前日志，`549919233.mp3` 时长约 202.9 秒，低于 `--max-duration-seconds 600`，因此不是 long-skip；同批旧 `error` 中 `1388631794.mp3`、`2144984014.mp3`、`549808695.mp3` 超过 600 秒但已被历史轮次写成 `metadata(status=error)`。`prepare_separation.py` 现在在 worker 正常扫描到旧 `metadata(status=error)` 时先按当前上限用 `ffprobe` 重判时长，超长则直接改写为 `skiplong` 并跳过，不进入 RoFormer，也不依赖再次崩溃重启。
 - 2026-06-09：按用户要求把 `mossland-codec.yaml` 的数据源改成直接读取 `NETEASE_SPIDER_SEPERATION` prepared folder：新增 `PreparedSeparationDataset`，加载 `mixture/vocals/accompaniment` 并统一裁切；配置已启用 `separate_vocals` 与 `separate_accompaniment`，不再嵌套原始 `SampleDataset`。
 - 2026-06-09：继续优化 prepared dataset：不再读取 `prepare_separation.py` progress 日志，改为首次扫描 prepared `audio/` 子树生成 `${output_root}/index.list`，后续训练直接读索引；`MosslandTaskDataset` 先抽任务并调用 `get_item_for_task()`，非分离任务只解码 `mixture.mp3`，分离任务只额外解码对应 stem；删除旧的包装式 separation stem dataset。
 - 2026-06-09：简化任务数据假设：分离任务只接受 prepared dataset 显式提供的 `mixture` 和目标 stem，不再支持 `mix` alias、`vocals+accompaniment` 合成 mixture 或 `drums/bass/other` stem fallback；`super_resolution.low_sample_rate` 支持 `[min, max]` 范围随机采样。
@@ -385,3 +386,75 @@
 - 2026-06-10T03:03:58Z `PreCompact`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
 
 - 2026-06-10T03:04:23Z `PostCompact`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T03:08:48Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T03:45:28Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T03:48:40Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T03:51:03Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T03:56:51Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:36:57Z `SessionStart`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:36:57Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:40:35Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:41:46Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:43:41Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:45:18Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:46:53Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:49:53Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:50:43Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:52:19Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:59:27Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-10T11:59:45Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:29:05Z `SessionStart`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:29:05Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:32:03Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:34:44Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:35:36Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:36:06Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:36:16Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:37:26Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:37:47Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:38:13Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:39:18Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:39:36Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:39:56Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:40:35Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:41:03Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:42:13Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:42:58Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:45:17Z `UserPromptSubmit`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。
+
+- 2026-06-11T09:46:53Z `Stop`: 如果任务状态变化，刷新当前工作、下一步和阻塞项。

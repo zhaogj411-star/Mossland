@@ -202,6 +202,62 @@ def test_prepared_separation_dataset_reuses_existing_index_list(tmp_path):
     assert second.item_dirs == [item_dir]
 
 
+def test_prepared_separation_dataset_fixed_length_uses_item_count_modulo(
+    tmp_path,
+    monkeypatch,
+):
+    first_dir = tmp_path / "separated" / "audio" / "20260520" / "1001230"
+    second_dir = tmp_path / "separated" / "audio" / "20260520" / "1009999"
+    _write_prepared_item(first_dir)
+    _write_prepared_item(second_dir)
+
+    loaded_dirs = []
+
+    def fake_load_item(self, item_dir, task_id=None, task_ids=None):
+        loaded_dirs.append(item_dir)
+        return {"audio": torch.ones(2, 8), "mixture": torch.ones(2, 8)}, {
+            "separation_dir": str(item_dir)
+        }
+
+    monkeypatch.setattr(datasets.PreparedSeparationDataset, "_load_item", fake_load_item)
+
+    dataset = datasets.PreparedSeparationDataset(
+        dirs=[tmp_path / "separated"],
+        sample_size=8,
+        sample_rate=48000,
+        random_crop=False,
+        length=5,
+    )
+
+    _, info = dataset.get_item_for_task(4, "reconstruct")
+
+    assert len(dataset) == 5
+    assert loaded_dirs == [first_dir]
+    assert info["separation_dir"] == str(first_dir)
+
+
+def test_prepared_separation_dataset_rebuild_index_updates_item_dirs(tmp_path):
+    root = tmp_path / "separated"
+    first_dir = root / "audio" / "20260520" / "1001230"
+    _write_prepared_item(first_dir)
+    dataset = datasets.PreparedSeparationDataset(
+        dirs=[root],
+        sample_size=8,
+        sample_rate=48000,
+        random_crop=False,
+    )
+
+    second_dir = root / "audio" / "20260520" / "1009999"
+    _write_prepared_item(second_dir)
+
+    dataset.rebuild_index()
+
+    assert dataset.item_dirs == [first_dir, second_dir]
+    assert (root / "index.list").read_text(encoding="utf-8") == (
+        "audio/20260520/1001230\naudio/20260520/1009999\n"
+    )
+
+
 def test_prepared_separation_dataset_lazily_filters_overlong_items_with_ffprobe(
     tmp_path,
     monkeypatch,

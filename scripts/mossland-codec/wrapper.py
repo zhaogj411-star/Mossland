@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import os
+from collections.abc import Iterable
 
 import lightning as pl
 import torch
@@ -33,6 +34,56 @@ def _label_at(label: str | tuple[str, ...], index: int) -> str:
     return label
 
 
+def _normalize_positive_int_or_none(value: int | None, name: str) -> int | None:
+    if value is None:
+        return None
+    normalized = int(value)
+    if normalized <= 0:
+        raise ValueError(f"{name} must be a positive integer or None")
+    return normalized
+
+
+def _iter_reindexable_datasets(root, seen: set[int] | None = None):
+    if root is None:
+        return
+    if seen is None:
+        seen = set()
+    obj_id = id(root)
+    if obj_id in seen:
+        return
+    seen.add(obj_id)
+
+    rebuild_index = getattr(root, "rebuild_index", None)
+    if callable(rebuild_index):
+        yield root
+
+    for attr_name in ("dataset", "datasets", "train_dataset", "val_dataset", "test_dataset"):
+        child = getattr(root, attr_name, None)
+        if child is None:
+            continue
+        if isinstance(child, dict):
+            children = child.values()
+        elif isinstance(child, Iterable) and not isinstance(child, (str, bytes)):
+            children = child
+        else:
+            children = (child,)
+        for item in children:
+            yield from _iter_reindexable_datasets(item, seen)
+
+
+def _rebuild_dataset_indexes(datamodule) -> int:
+    rebuilt = 0
+    seen = set()
+    for dataset in _iter_reindexable_datasets(datamodule):
+        dataset_id = id(dataset)
+        if dataset_id in seen:
+            continue
+        seen.add(dataset_id)
+        dataset.rebuild_index()
+        rebuilt += 1
+    return rebuilt
+
+
 class MosslandCodecTrainingWrapper(CodecTrainingBase):
     """Mossland 多任务 codec 训练 wrapper。"""
 
@@ -57,6 +108,7 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         lognormal_std: float = 2.0,
         consistency_loss_delta: float = 0.00054,
         consistency_min_sigma_delta: float = 0.001,
+        index_data_every_step: int | None = None,
         fail_on_nonfinite: bool = True,
     ):
         super().__init__(
@@ -89,6 +141,11 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         self.lognormal_std = lognormal_std
         self.consistency_loss_delta = consistency_loss_delta
         self.consistency_min_sigma_delta = consistency_min_sigma_delta
+        self.index_data_every_step = _normalize_positive_int_or_none(
+            index_data_every_step,
+            "index_data_every_step",
+        )
+        self._last_index_data_step: int | None = None
 
     def configure_optimizers(self):
         optimizer_name = self.optimizer_name.lower()
@@ -328,6 +385,30 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         for name, value in metrics.items():
             self.log(name, value, prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
         return loss
+
+    def _maybe_rebuild_data_index(self, trainer) -> int:
+        if self.index_data_every_step is None:
+            return 0
+        step = int(getattr(trainer, "global_step", 0))
+        if step <= 0 or step == self._last_index_data_step:
+            return 0
+        if step % self.index_data_every_step != 0:
+            return 0
+
+        self._last_index_data_step = step
+        return _rebuild_dataset_indexes(getattr(trainer, "datamodule", None))
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        rebuilt = self._maybe_rebuild_data_index(self.trainer)
+        if rebuilt:
+            self.log(
+                "data/reindexed_datasets",
+                float(rebuilt),
+                prog_bar=False,
+                on_step=True,
+                on_epoch=False,
+                sync_dist=False,
+            )
 
 
 class MosslandCodecTrainingCallback(pl.Callback):

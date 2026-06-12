@@ -1043,7 +1043,7 @@ class MosslandCodecTransformer(nn.Module):
         else:
             raise ValueError(f'Invalid output type: {output}. Must be one of: (left, right, both, features).')
 
-    def decode_single_parallel(self, latents, denoising_steps=None):
+    def decode_single_parallel(self, latents, denoising_steps=None, task_id='reconstruct'):
         """Run the full parallel denoising schedule for one sample/batch."""
         if denoising_steps is None:
             denoising_steps = self.default_denoising_steps_parallel
@@ -1058,19 +1058,19 @@ class MosslandCodecTransformer(nn.Module):
             inp, num_samples = preprocess_parallel_input(inp, iteration=step, length=self.spec_length, dim=-1)
             inp_latents, num_samples = preprocess_parallel_input(latents, iteration=step, length=self.num_latents, dim=-2)
             inp_features = preprocess_parallel_features(features, iteration=step, num_samples=num_chunks, dim=-1)
-            out = self.decoder_forward(inp, inp_latents, inp_features, output='both', sigma_left=sigma, sigma_right=sigma)
+            out = self.decoder_forward(inp, inp_latents, inp_features, output='both', sigma_left=sigma, sigma_right=sigma, task_id=task_id)
             out = postprocess_parallel_input(out, iteration=step, num_samples=num_samples, length=self.spec_length, dim=-1)
             sigma = self.get_sigma_continuous(1.-(step+1)*step_size)
             inp = reverse_step(out, torch.randn_like(out), sigma, sigma_min=self.sigma_min)
         return out
 
-    def decode_parallel(self, latents, denoising_steps=None, max_batch_size=None):
+    def decode_parallel(self, latents, denoising_steps=None, max_batch_size=None, task_id='reconstruct'):
         """Decode all timesteps in parallel using `distribute` for batching."""
         device = next(self.parameters()).device
-        out = distribute(self.decode_single_parallel, latents, max_batch_size, device, denoising_steps=denoising_steps, mixed_precision=self.mixed_precision)
+        out = distribute(self.decode_single_parallel, latents, max_batch_size, device, denoising_steps=denoising_steps, task_id=task_id, mixed_precision=self.mixed_precision)
         return out
 
-    def decode_autoregressive(self, latents, time_prompt=None, denoising_steps=None, max_batch_size=None):
+    def decode_autoregressive(self, latents, time_prompt=None, denoising_steps=None, max_batch_size=None, task_id='reconstruct'):
         """Autoregressive decoding over timesteps."""
         if denoising_steps is None:
             denoising_steps = self.default_denoising_steps_ar
@@ -1087,7 +1087,7 @@ class MosslandCodecTransformer(nn.Module):
                 sigma = self.sigma_max
                 features = distribute(self.pre_decoder_forward, latents[:, :self.num_latents*2], max_batch_size, device, mixed_precision=self.mixed_precision)
                 for step in range(denoising_steps):
-                    out = distribute(self.decoder_forward, torch.cat((noise, torch.zeros_like(noise)), dim=-1), max_batch_size, device, latents[:, :self.num_latents*2], features=features, output='left', sigma_left=sigma, mixed_precision=self.mixed_precision)
+                    out = distribute(self.decoder_forward, torch.cat((noise, torch.zeros_like(noise)), dim=-1), max_batch_size, device, latents[:, :self.num_latents*2], features=features, output='left', sigma_left=sigma, task_id=task_id, mixed_precision=self.mixed_precision)
                     sigma = self.get_sigma_continuous(1.-(step+1)*step_size)
                     noise = reverse_step(out, torch.randn_like(out), sigma, sigma_min=self.sigma_min)
                 out_ls.append(out)
@@ -1099,14 +1099,14 @@ class MosslandCodecTransformer(nn.Module):
                 sigma_last_out = sigma_prompt
                 features = distribute(self.pre_decoder_forward, latents[:, (i-1)*self.num_latents:(i+1)*self.num_latents], max_batch_size, device, mixed_precision=self.mixed_precision)
                 for step in range(denoising_steps):
-                    out = distribute(self.decoder_forward, torch.cat([last_out, noise], dim=-1), max_batch_size, device, latents[:, (i-1)*self.num_latents:(i+1)*self.num_latents], features=features, output='right', sigma_left=sigma_last_out, sigma_right=sigma, mixed_precision=self.mixed_precision)
+                    out = distribute(self.decoder_forward, torch.cat([last_out, noise], dim=-1), max_batch_size, device, latents[:, (i-1)*self.num_latents:(i+1)*self.num_latents], features=features, output='right', sigma_left=sigma_last_out, sigma_right=sigma, task_id=task_id, mixed_precision=self.mixed_precision)
                     sigma = self.get_sigma_continuous(1.-(step+1)*step_size)
                     noise = reverse_step(out, torch.randn_like(out), sigma, sigma_min=self.sigma_min)
                 out_ls.append(out)
         out = torch.cat(out_ls, dim=-1)
         return out
 
-    def decode_autoregressive_step(self, current_latents, past_repr=None, past_latents=None, time_prompt=None, denoising_steps=None, max_batch_size=None):
+    def decode_autoregressive_step(self, current_latents, past_repr=None, past_latents=None, time_prompt=None, denoising_steps=None, max_batch_size=None, task_id='reconstruct'):
         """Single-step live decoding with optional past spectrogram and latents."""
         if denoising_steps is None:
             denoising_steps = self.default_denoising_steps_ar
@@ -1121,7 +1121,7 @@ class MosslandCodecTransformer(nn.Module):
             features = distribute(self.pre_decoder_forward, current_latents[:, -self.num_latents:], max_batch_size, device, mixed_precision=self.mixed_precision)
             features = [torch.cat((el, torch.zeros_like(el)), dim=-1) for el in features]
             for step in range(denoising_steps):
-                out = distribute(self.decoder_forward, torch.cat((noise, torch.zeros_like(noise)), dim=-1), max_batch_size, device, torch.cat((current_latents[:, -self.num_latents:], torch.zeros_like(current_latents[:, -self.num_latents:])), dim=-2), features=features, output='left', sigma_left=sigma, mixed_precision=self.mixed_precision)
+                out = distribute(self.decoder_forward, torch.cat((noise, torch.zeros_like(noise)), dim=-1), max_batch_size, device, torch.cat((current_latents[:, -self.num_latents:], torch.zeros_like(current_latents[:, -self.num_latents:])), dim=-2), features=features, output='left', sigma_left=sigma, task_id=task_id, mixed_precision=self.mixed_precision)
                 sigma = self.get_sigma_continuous(1.-(step+1)*step_size)
                 noise = reverse_step(out, torch.randn_like(out), sigma, sigma_min=self.sigma_min)
             out = torch.cat((torch.zeros_like(out), out), dim=-1)
@@ -1137,7 +1137,7 @@ class MosslandCodecTransformer(nn.Module):
             sigma_last_out = sigma_prompt
             features = distribute(self.pre_decoder_forward, torch.cat((past_latents, current_latents[:, -self.num_latents:]), dim=-2), max_batch_size, device, mixed_precision=self.mixed_precision)
             for step in range(denoising_steps):
-                out = distribute(self.decoder_forward, torch.cat([last_out, noise], dim=-1), max_batch_size, device, torch.cat((past_latents, current_latents[:, -self.num_latents:]), dim=-2), features=features, output='right', sigma_left=sigma_last_out, sigma_right=sigma, mixed_precision=self.mixed_precision)
+                out = distribute(self.decoder_forward, torch.cat([last_out, noise], dim=-1), max_batch_size, device, torch.cat((past_latents, current_latents[:, -self.num_latents:]), dim=-2), features=features, output='right', sigma_left=sigma_last_out, sigma_right=sigma, task_id=task_id, mixed_precision=self.mixed_precision)
                 sigma = self.get_sigma_continuous(1.-(step+1)*step_size)
                 noise = reverse_step(out, torch.randn_like(out), sigma, sigma_min=self.sigma_min)
             out = torch.cat((last_out_clean, out), dim=-1)

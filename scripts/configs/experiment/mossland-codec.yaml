@@ -4,8 +4,8 @@ project_name: mossland-codec
 checkpoint_monitor: loss
 tags: ["audioCodec", "mossland-codec", "multi-task"]
 seed: null
-resume_from_ckpt: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-09_11-23-38/checkpoints/last.ckpt
-pretrain_ckpt_path: null
+resume_from_ckpt: null
+pretrain_ckpt_path: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/ckpt/mossland-codec0610/checkpoint.ckpt
 checkpoint_every_n_train_steps: 5000
 
 data:
@@ -21,7 +21,8 @@ data:
       num_channels: 2
       strict: false
       max_duration_seconds: 300 # use ffprobe metadata probe to skip items >= 5 minutes before mp3 decode
-      crops_per_file: 8 # load one prepared item once, crop 8 segments with random tasks, then flatten to the effective training batch
+      crops_per_file: 16 # load one prepared item once, crop 16 segments with random tasks, then flatten to the effective training batch
+      length: 10000000 # fixed logical epoch length; actual prepared item lookup wraps by len(item_dirs)
     active_tasks:
       - reconstruct
       - separate_vocals
@@ -102,6 +103,7 @@ wrapper:
   lognormal_std: 2.0
   consistency_loss_delta: 0.00054
   consistency_min_sigma_delta: 0.001
+  index_data_every_step: 20000 # set a positive int to call dataset.rebuild_index() from on_train_batch_end; null disables reindexing
   fail_on_nonfinite: true
 
 callbacks:
