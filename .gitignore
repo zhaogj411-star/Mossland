@@ -8,6 +8,7 @@ core.*
 ckpt/
 .codegraph/
 tmp/
+scripts/tools/oss_tools/rclone.conf
 logs/
 outputs/
 wandb/

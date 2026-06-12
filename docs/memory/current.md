@@ -9,6 +9,9 @@
 - `scripts/mossland-codec` 第一版已改为自包含多任务 codec，实现 `MosslandCodecTransformer`、训练 wrapper、任务数据适配层、Hydra 配置、separation 预处理和 prepared separation dataset。
 - `scripts/mossland-codec` 已移除 `hparams.py` 和 `hparams_inference.py`；模型、音频表示、噪声调度和推理默认项通过 `MosslandCodecTransformer(...)`、Hydra `model:` 或通过 `scripts.factory.load_model()` 从 `config.yaml/checkpoint.ckpt` 读取。
 - 已完成 `scripts/mossland-codec/tasks.py` 5 个任务的评估指标调研，报告在 `docs/evaluation-metrics.md`，论文 PDF 在 `docs/papers/`；`mono_to_stereo` 按生成式 stereo rendering/upmix 任务处理，不把某个双声道 reference 当唯一真值。
+- 2026-06-12 审查并修正 `scripts/tools/local_queue`：旧 worker 在 lease 过期并被新 worker 抢占后不能再提交结果或记录失败；`write_manifest()` 不允许对已有 job 追加，避免重复 manifest。对应测试在 `tests/test_local_queue.py`。
+- 2026-06-12 新增 `scripts/tools/oss_tools`，目录内保存 `bin/rclone`，本机 `rclone.conf` 放在同目录但被 `.gitignore` 忽略；封装 OSS 上传、下载、存在检查和删除，小文件实测耗时已写入 `OssClient` 注释。
+- 2026-06-12 新增 `scripts/data_processing/oss_prepare_separation.py`：`local_queue` handler，按 task 从 OSS 下载单条音频，调用 `prepare_separation.process_file()` 本地分离，上传四个 stem/metadata 文件到 OSS 对应目录，并清理任务临时目录；`scripts/data_processing/README.md` 有配置示例。
 
 ## 稳定决策
 
@@ -17,6 +20,8 @@
 - 除非内容已成为当前 Mossland 需求、决策或工作流，不复制训练框架的长篇文档。
 - 面向人阅读的文档、agent harness 说明、hook 提醒、脚本输出和未来 harness 设定默认使用中文；命令名、路径、scope、事件名、JSON key 和代码标识保留英文接口。
 - 完全由机器管理的 harness 代码集中在 `agent-code/`；`.codex/hooks.json` 仍留在 `.codex/` 作为 Codex 配置入口。
+- `scripts/tools/local_queue` 的一致性边界是“任务可以重复执行，但只有当前 lease owner 能提交结果或记录失败”；manifest 一旦生成不可就地追加，处理逻辑或配置变化应新建 job。
+- `scripts/tools/oss_tools/rclone.conf` 含本机 OSS 配置并被 `.gitignore` 忽略；不要把配置内容写入文档或日志。若迁移到新机器，复制本机 config 或设置 `OSS_TOOLS_RCLONE_CONFIG`。
 - `scripts/mossland-codec` 只保留一个 hyphen 目录；不要再创建 `scripts/mossland_codec`。
 - 模型入口统一命名为 `MosslandCodecTransformer`，因为核心实现是 Transformer/Transformer_Diffusion；不要再恢复旧的 `UNet` 命名。
 - `scripts/codicodec/` 和 `scripts/configs/experiment/codicodec.yaml` 保留为独立参考实现；`scripts/mossland-codec/` 不 import `scripts.codicodec`。
