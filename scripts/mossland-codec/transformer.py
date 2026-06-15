@@ -98,10 +98,12 @@ class Transformer_Diffusion(nn.Module):
             AttentionBlock(dim, heads=heads, mlp_mult=mlp_mult, cond_dim=cond_dim, training_length=training_length, causal=self.autoregressive, pos_emb=pos_emb, group_together=latents_per_timestep, dropout=dropout) for _ in range(num_layers)
         ])
 
-    def forward(self, x, cond, latent, more_latent=None, skip_input_layer=False, skip_output_layer=False, attn_mask=None, print_magnitudes=False):
+    def forward(self, x, cond, latent=None, more_latent=None, skip_input_layer=False, skip_output_layer=False, attn_mask=None, print_magnitudes=False):
         # x: noisy samples with shape (batch_size, length, channels)
         # cond: conditioning information with shape (batch_size, length, channels).
         #       cond is usually the ouput of a MLP that takes as input the time embedding (and class information if applicable)
+        # latent: optional conditioning tokens. When omitted, the Transformer
+        # runs on the left/right sample tokens only.
 
         if not skip_input_layer:
             x = self.linear_input(x)
@@ -109,11 +111,16 @@ class Transformer_Diffusion(nn.Module):
                 print(f"Linear Input: {x.abs().mean()}")
 
         x1,x2 = torch.chunk(x, chunks=2, dim=-2)
-        lat1,lat2 = torch.chunk(latent, chunks=2, dim=-2)
-        if more_latent is not None:
-            x = torch.cat([x1, lat1, more_latent, x2, lat2, more_latent], dim=-2)
+        if latent is None:
+            if more_latent is not None:
+                raise ValueError("more_latent requires latent tokens")
+            x = torch.cat([x1, x2], dim=-2)
         else:
-            x = torch.cat([x1, lat1, x2, lat2], dim=-2)
+            lat1,lat2 = torch.chunk(latent, chunks=2, dim=-2)
+            if more_latent is not None:
+                x = torch.cat([x1, lat1, more_latent, x2, lat2, more_latent], dim=-2)
+            else:
+                x = torch.cat([x1, lat1, x2, lat2], dim=-2)
 
         if self.pe is not None:
             pe = self.pe[:, :x.size(-2)]

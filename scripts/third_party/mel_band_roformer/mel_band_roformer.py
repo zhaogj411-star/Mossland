@@ -495,8 +495,12 @@ class MelBandRoformer(Module):
         masks_summed = torch.zeros_like(stft_repr_expanded_stems).scatter_add_(2, scatter_indices, masks)
 
         denom = repeat(self.num_bands_per_freq, 'f -> (f r) 1', r=channels)
+        denom = denom.to(device=masks_summed.device, dtype=masks_summed.real.dtype)
 
-        masks_averaged = masks_summed / denom.clamp(min=1e-8)
+        denom = denom.clamp(min=1e-8)
+        # PPU torch 2.7 returns NaN for complex64 / float32 on CUDA. Divide
+        # real and imaginary parts explicitly to keep RoFormer masks finite.
+        masks_averaged = torch.complex(masks_summed.real / denom, masks_summed.imag / denom)
 
         # modulate stft repr with estimated mask
 

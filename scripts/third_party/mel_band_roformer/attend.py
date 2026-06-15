@@ -8,6 +8,11 @@ import torch.nn.functional as F
 
 from einops import rearrange, reduce
 
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
+
 # constants
 
 FlashAttentionConfig = namedtuple('FlashAttentionConfig', ['enable_flash', 'enable_math', 'enable_mem_efficient'])
@@ -62,6 +67,25 @@ class Attend(nn.Module):
 
     def flash_attn(self, q, k, v):
         _, heads, q_len, _, k_len, is_cuda, device = *q.shape, k.shape[-2], q.is_cuda, q.device
+
+        if (
+            flash_attn_func is not None
+            and is_cuda
+            and q.dtype in (torch.float16, torch.bfloat16)
+            and k.dtype == q.dtype
+            and v.dtype == q.dtype
+        ):
+            q_flash = rearrange(q, 'b h n d -> b n h d')
+            k_flash = rearrange(k, 'b h n d -> b n h d')
+            v_flash = rearrange(v, 'b h n d -> b n h d')
+            out = flash_attn_func(
+                q_flash,
+                k_flash,
+                v_flash,
+                dropout_p=self.dropout if self.training else 0.,
+                causal=False,
+            )
+            return rearrange(out, 'b n h d -> b h n d')
 
         # Check if there is a compatible device for flash attention
 

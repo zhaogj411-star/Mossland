@@ -579,6 +579,8 @@ class MosslandCodecTransformer(nn.Module):
         num_latents: int = 128,
         num_more_latents: int = 8,
         fsq_levels: list[int] | None = None,
+        use_fsq: bool = True,
+        bottleneck_channels: int | None = None,
         frontend_base_channels: int = 64,
         frontend_multipliers_list: list[int] | None = None,
         frontend_layers_list: list[int] | None = None,
@@ -593,6 +595,8 @@ class MosslandCodecTransformer(nn.Module):
         max_batch_size_decode: int = 32,
         sigma_rescale: float = 0.8,
         load_path_inference_default: str | None = None,
+        task_names: list[str] | tuple[str, ...] | None = None,
+        task_embedding_init_std: float = 0.02,
     ):
         super().__init__()
         if torch_compile_cache_dir is not None:
@@ -609,8 +613,14 @@ class MosslandCodecTransformer(nn.Module):
             frontend_freq_downsample_list = [0, 1, 0]
         if num_layers_encoder is None:
             num_layers_encoder = num_layers
+        if task_names is None:
+            task_names = TASK_NAMES
+        task_names = tuple(task_names)
+        if not task_names:
+            raise ValueError("task_names must not be empty")
 
         self.torch_compile_cache_dir = torch_compile_cache_dir
+        self.task_names = task_names
         self.mixed_precision = bool(mixed_precision)
         self.stereo = bool(stereo)
         self.default_time_prompt = float(default_time_prompt)
@@ -632,7 +642,12 @@ class MosslandCodecTransformer(nn.Module):
         self.num_latents = int(num_latents)
         self.num_more_latents = int(num_more_latents)
         self.fsq_levels = list(fsq_levels)
-        self.bottleneck_channels = len(self.fsq_levels)
+        self.use_fsq = bool(use_fsq)
+        if bottleneck_channels is None:
+            bottleneck_channels = len(self.fsq_levels)
+        self.bottleneck_channels = int(bottleneck_channels)
+        if self.use_fsq and self.bottleneck_channels != len(self.fsq_levels):
+            raise ValueError("FSQ bottleneck_channels must match len(fsq_levels)")
         self.frontend_base_channels = int(frontend_base_channels)
         self.frontend_multipliers_list = list(frontend_multipliers_list)
         self.frontend_layers_list = list(frontend_layers_list)
@@ -647,6 +662,7 @@ class MosslandCodecTransformer(nn.Module):
         self.max_batch_size_decode = int(max_batch_size_decode)
         self.sigma_rescale = float(sigma_rescale)
         self.load_path_inference_default = load_path_inference_default
+        self.task_embedding_init_std = float(task_embedding_init_std)
         self.stft_channels = 4 if self.stereo else 2
         self.downsample_ratio = (
             (4**self.frontend_freq_downsample_list.count(0))
@@ -668,9 +684,13 @@ class MosslandCodecTransformer(nn.Module):
         scale = float(self.dim) ** -0.5
         self.emb = PositionalEmbedding(embedding_size=self.cond_channels)
         self.emb_proj = nn.Sequential(init(nn.Linear(self.cond_channels, self.cond_channels)), nn.SiLU(), init(nn.Linear(self.cond_channels, self.cond_channels)), nn.SiLU(), init(nn.Linear(self.cond_channels, self.cond_channels)), nn.SiLU())
-        self.task_to_idx = {name: idx for idx, name in enumerate(TASK_NAMES)}
-        self.task_embedding = nn.Embedding(len(TASK_NAMES), self.cond_channels)
-        nn.init.zeros_(self.task_embedding.weight)
+        self.task_to_idx = {name: idx for idx, name in enumerate(self.task_names)}
+        self.task_embedding = nn.Embedding(len(self.task_names), self.cond_channels)
+        nn.init.normal_(
+            self.task_embedding.weight,
+            mean=0.0,
+            std=self.task_embedding_init_std,
+        )
 
         self.latents = nn.Parameter(scale*torch.randn(1, self.num_latents, self.dim), requires_grad=True)
         self.mask_embedding = nn.Parameter(scale*torch.randn(1, self.freq_dim, 1, self.dim), requires_grad=True)
@@ -734,7 +754,7 @@ class MosslandCodecTransformer(nn.Module):
             cond_dim=self.cond_channels,
         ).to(memory_format=torch.channels_last)
 
-        self.fsq = FSQ(levels=self.fsq_levels)
+        self.fsq = FSQ(levels=self.fsq_levels) if self.use_fsq else None
 
     def get_attn_mask(self, x):
         """Generate attention mask for autoregressive decoding."""
@@ -833,7 +853,9 @@ class MosslandCodecTransformer(nn.Module):
             x = self.encoder(x, torch.cat((self.latents.expand(x.shape[0], -1, -1), self.more_latents_encoder.expand(x.shape[0], -1, -1)), -2), return_latents=True, skip_input_layer=True, skip_output_layer=False, print_magnitudes=log_magnitude)[:, :self.num_latents]
         else:
             x = self.encoder(x, self.latents.expand(x.shape[0], -1, -1), return_latents=True, skip_input_layer=True, skip_output_layer=False, print_magnitudes=log_magnitude)[:, :self.num_latents]
-        if dont_quantize:
+        if self.fsq is None:
+            pass
+        elif dont_quantize:
             x = self.fsq.dont_quantize(x)
         else:
             x = self.fsq.quantize(x)
@@ -855,7 +877,9 @@ class MosslandCodecTransformer(nn.Module):
             x = self.encoder(x, torch.cat((self.latents.expand(x.shape[0], -1, -1), self.more_latents_encoder.expand(x.shape[0], -1, -1)), -2), return_latents=True, skip_input_layer=True, skip_output_layer=False, print_magnitudes=log_magnitude)[:, :self.num_latents]
         else:
             x = self.encoder(x, self.latents.expand(x.shape[0], -1, -1), return_latents=True, skip_input_layer=True, skip_output_layer=False, print_magnitudes=log_magnitude)[:, :self.num_latents]
-        if dont_quantize:
+        if self.fsq is None:
+            pass
+        elif dont_quantize:
             x = self.fsq.dont_quantize(x)
         else:
             x = self.fsq.quantize(x)
@@ -946,7 +970,7 @@ class MosslandCodecTransformer(nn.Module):
         batch_size = sigma_embedding.shape[0]
         device = sigma_embedding.device
         task_idx = self._coerce_condition_indices(
-            TASK_NAMES,
+            self.task_names,
             self.task_to_idx,
             task_id,
             task_idx,

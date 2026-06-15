@@ -98,6 +98,7 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         lr_schedule: str = "cosine_decay",
         lr_warmup_steps: int = 10_000,
         lr_schedule_total_steps: int = 2_000_000,
+        random_mix_prob: float = 0.0,
         fsq_dropout_prob: float = 0.75,
         consistency_step: float = 0.1,
         consistency_step_schedule: str = "exponential",
@@ -131,6 +132,7 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         self.optimizer_name = optimizer_name
         self.lr_schedule = lr_schedule
         self.lr_schedule_total_steps = int(lr_schedule_total_steps)
+        self.random_mix_prob = float(random_mix_prob)
         self.fsq_dropout_prob = fsq_dropout_prob
         self.consistency_step = consistency_step
         self.consistency_step_schedule = consistency_step_schedule
@@ -256,6 +258,31 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
             return True
         return bool(torch.rand((), device=device) < self.fsq_dropout_prob)
 
+    def _maybe_random_mix(
+        self,
+        src: torch.Tensor,
+        target_audio: torch.Tensor,
+        task_id: str | tuple[str, ...],
+    ):
+        if self.random_mix_prob <= 0.0 or src.shape[0] < 2:
+            return src, target_audio, torch.zeros((), device=src.device)
+
+        task_ids = _label_tuple(task_id)
+        if any(label != "reconstruct" for label in task_ids):
+            raise ValueError(
+                "random_mix_prob is only supported for reconstruction-only "
+                "Mossland batches because mixing breaks task src/target pairs"
+            )
+
+        apply_mix = torch.rand((), device=src.device) < self.random_mix_prob
+        if not bool(apply_mix):
+            return src, target_audio, torch.zeros((), device=src.device)
+
+        permutation = torch.randperm(src.shape[0], device=src.device)
+        src = (src + src[permutation]).clamp(-1.0, 1.0)
+        target_audio = (target_audio + target_audio[permutation]).clamp(-1.0, 1.0)
+        return src, target_audio, torch.ones((), device=src.device)
+
     def _pseudo_huber_loss(self, predicted: torch.Tensor, target: torch.Tensor):
         if self.consistency_loss_delta == 0.00054:
             return pseudo_huber_loss(predicted, target)
@@ -327,6 +354,11 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
 
         src = self.model.prepare_audio_batch(task.src)
         target_audio = self.model.prepare_audio_batch(task.target)
+        src, target_audio, mix_applied = self._maybe_random_mix(
+            src,
+            target_audio,
+            task.task_id,
+        )
         self._assert_finite("src", src, info)
         self._assert_finite("target_audio", target_audio, info)
 
@@ -353,6 +385,14 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         self._assert_finite("loss", loss, info)
 
         self.log("loss", loss, prog_bar=True, on_step=True, on_epoch=False, sync_dist=False)
+        self.log(
+            "augment/random_mix",
+            mix_applied,
+            prog_bar=False,
+            on_step=True,
+            on_epoch=False,
+            sync_dist=False,
+        )
         task_ids = _label_tuple(task.task_id)
         for task_id in dict.fromkeys(task_ids):
             self.log(

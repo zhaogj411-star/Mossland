@@ -8,7 +8,8 @@
 - `scripts/mossland-codec/` 是 Mossland codec 唯一实现目录，使用 hyphen 路径，不再创建 `scripts/mossland_codec/`。
 - `scripts/mossland-codec/` 不 import `scripts.codicodec`。需要的模型、音频表示、训练工具和推理辅助代码已经集成在本目录。
 - `scripts/mossland-codec/hparams.py` 和 `scripts/mossland-codec/hparams_inference.py` 已删除。模型、音频表示、噪声调度和推理默认值不再从全局 hparams 模块读取，统一通过 `MosslandCodecTransformer(...)` 构造参数、`EncoderDecoder(model_kwargs=...)` 或 Hydra `model:` 配置显式传入。
-- 模型类是 `scripts.mossland-codec.models.MosslandCodecTransformer`。decoder conditioning 只使用 sigma embedding 加上 5 个任务的 `task_embedding`；模型也负责 `prepare_audio_batch()` 和 `generate_waveform()` 这类与模型输入长度、声道和推理路径强相关的逻辑。
+- 模型类是 `scripts.mossland-codec.models.MosslandCodecTransformer`。decoder conditioning 只使用 sigma embedding 加上任务名 `task_embedding`；模型也负责 `prepare_audio_batch()` 和 `generate_waveform()` 这类与模型输入长度、声道和推理路径强相关的逻辑。
+- codec 与 no-latent A2A 模型的 `task_embedding` 默认使用 `normal_(0, 0.02)` 初始化，不使用全 0 初始化；A2A 配置显式设置 `model.task_embedding_init_std: 0.02`。
 - wrapper 类是 `scripts.mossland-codec.wrapper.MosslandCodecTrainingWrapper`，负责消费已经构造好的任务 payload、计算 consistency loss、维护 EMA、optimizer/scheduler 和 demo 输出；不再抽样任务或构造 `src/target`。
 - demo callback 在生成 demo 前后都会执行 `gc.collect()`、`torch.cuda.synchronize()` 和 `torch.cuda.empty_cache()`，避免 demo 推理与训练 step 的缓存显存重叠导致 OOM；每个样本会分别保存 `quantized` 与 `continuous` 两份 `src/target/generated` 对比音频，分别对应 `dont_quantize=False` 和 `dont_quantize=True`。
 - 不集成完整 `scripts.music2latent`；只保留当前 wrapper 需要的 finite check、grad norm、EMA 更新、导出和 pseudo-Huber loss。
@@ -19,11 +20,16 @@
 
 - `reconstruct`
 - `separate_vocals`
+- `separate_drums`
+- `separate_bass`
+- `separate_other`
 - `separate_accompaniment`
 - `super_resolution`
 - `mono_to_stereo`
 
 `MosslandTaskDataset` 是唯一的训练任务抽样入口，把普通音频或 prepared stem payload 适配为 `src/target/task_id`。`MosslandTaskBatch` 负责标准 payload 的 `to_payload/from_payload` 转换，wrapper 只接受这个 schema。audio super-resolution 的具体 downsample rate 和 mono/stereo channel mode 不再作为额外条件传给模型。
+
+MUSDB18-HQ 四轨训练使用 `Musdb18HqSeparationDataset` 直接读取解压后的 wav stem 树：`train/test/<track>/{mixture,vocals,drums,bass,other}.wav`。当前多任务 A2A 配置是 `scripts/configs/experiment/codicodec-paper-repro-a2a.yaml`，命令 `python -m scripts.train experiment=codicodec-paper-repro-a2a`：`separate_vocals`、`separate_drums`、`separate_bass`、`separate_other` 路由到 MUSDB18-HQ；`super_resolution` 和 `mono_to_stereo` 路由到原始 `/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER` 音频。A2A 模型复用 Mossland STFT representation、frontend、`Transformer_Diffusion`、task embedding 和 consistency loss；source 侧现在先经过非压缩 encoder，`num_latents` 自动等于 encoder token 数 `data_length`，`bottleneck_channels` 必须等于 `dim`，`num_more_latents=0`，`use_fsq=false`，不使用 learned latent query 抽取信息，也不把 source 频谱直接 concat 到 decoder input。decoder 通过 source encoder tokens 和 decoder-aligned multiscale features 做 conditioning；这些 features 必须由 encoded source tokens 经过 `frontend_pre_decoder_up(..., skip_output_layer=True)` 生成，不能直接复用 `frontend_encoder_down` 的 raw features，否则真实下采样 frontend 会在 `frontend_decoder_down.add_feature()` 处发生空间维度错配。`MosslandTaskRoutedDataset` 返回固定 `info` schema，避免混合 MUSDB 与原始音频数据集时因异构 metadata key 导致 PyTorch default collate 抛 `KeyError`。
 
 ## Separation 预处理
 

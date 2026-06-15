@@ -7,6 +7,7 @@
 - `encodec.pdf`：EnCodec，codec/reconstruction 评估中使用 MUSHRA、ViSQOL、SI-SNR。
 - `soundstream.pdf`：SoundStream，codec 主观听测、ViSQOL、码率曲线。
 - `dac_rvqgan.pdf`：DAC / improved RVQGAN，ViSQOL、mel/STFT distance、SI-SDR、MUSHRA、bitrate efficiency。
+- `codicodec.pdf`：CoDiCodec，MusicCaps 上报告 SI-SDR、ViSQOL、VGGish FAD 和 CLAP FAD；可作为 Mossland codec 重建评估和 FAD 后端口径参考。
 - `visqol_v3.pdf`：ViSQOL v3 指标来源和开源实现说明。
 - `fad_original.pdf`：Fréchet Audio Distance 原始论文。
 - `fad_music_eval.pdf`：FAD 在音乐生成评估中的 sample-size bias 和 embedding 选择问题。

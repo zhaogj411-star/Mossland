@@ -1,0 +1,28 @@
+{
+  "musdb18hq": {
+    "title": "MUSDB18-HQ - an uncompressed version of MUSDB18",
+    "doi": "10.5281/zenodo.3338373",
+    "record_url": "https://zenodo.org/records/3338373",
+    "files": [
+      {
+        "filename": "musdb18hq.zip",
+        "size_bytes": 22656664047,
+        "download_url": "https://zenodo.org/api/records/3338373/files/musdb18hq.zip/content"
+      }
+    ],
+    "paper_context": "SiSEC/MUSDB source-separation evaluation; use test split and BSS Eval/museval-style metrics."
+  },
+  "musdb18": {
+    "title": "MUSDB18 - a corpus for music separation",
+    "doi": "10.5281/zenodo.1117372",
+    "record_url": "https://zenodo.org/records/1117372",
+    "files": [
+      {
+        "filename": "musdb18.zip",
+        "size_bytes": 4684228845,
+        "download_url": "https://zenodo.org/api/records/1117372/files/musdb18.zip/content"
+      }
+    ],
+    "paper_context": "Compressed STEM version of MUSDB18; prefer MUSDB18-HQ when waveform artifacts matter."
+  }
+}

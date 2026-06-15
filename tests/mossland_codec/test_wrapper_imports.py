@@ -40,6 +40,96 @@ def test_mossland_model_uses_task_conditioned_transformer_class_name():
     assert "channel_mode" not in generate_signature.parameters
 
 
+def test_mossland_model_can_disable_fsq_for_continuous_bottleneck():
+    module = importlib.import_module("scripts.mossland-codec.models")
+    model = module.MosslandCodecTransformer(
+        dim=8,
+        head_dim=4,
+        cond_channels=8,
+        num_layers=1,
+        num_layers_encoder=1,
+        num_latents=2,
+        num_more_latents=0,
+        bottleneck_channels=8,
+        use_fsq=False,
+        frontend_base_channels=4,
+        frontend_multipliers_list=[1],
+        frontend_layers_list=[1],
+        frontend_encoder_layers_list=[1],
+        frontend_freq_downsample_list=[],
+        hop=8,
+        fac=2,
+        spec_length=2,
+    )
+
+    assert model.fsq is None
+    assert model.bottleneck_channels == model.dim
+
+
+def test_transformer_diffusion_supports_no_latent_tokens():
+    module = importlib.import_module("scripts.mossland-codec.transformer")
+    model = module.Transformer_Diffusion(
+        input_dim=8,
+        output_dim=8,
+        training_length=4,
+        cond_dim=8,
+        dim=8,
+        num_layers=1,
+        heads=2,
+    )
+    x = torch.randn(2, 4, 8)
+    cond = torch.randn(2, 4, 8)
+
+    out = model(
+        x,
+        cond,
+        latent=None,
+        skip_input_layer=True,
+        skip_output_layer=True,
+    )
+
+    assert out.shape == x.shape
+
+
+def test_mossland_a2a_model_uses_noncompressive_source_encoder():
+    module = importlib.import_module("scripts.mossland-a2a.models")
+    model = module.MosslandA2ATransformer(
+        dim=8,
+        head_dim=4,
+        cond_channels=8,
+        num_layers=1,
+        frontend_base_channels=4,
+        frontend_multipliers_list=[1, 2],
+        frontend_layers_list=[1, 1],
+        frontend_freq_downsample_list=[0],
+        hop=8,
+        fac=2,
+        spec_length=4,
+    )
+    audio = torch.randn(2, 2, 40)
+    audio = model.prepare_audio_batch(audio)
+    representation = model.to_representation_encoder(audio)
+    src_tokens, src_features = model.encode_source(representation)
+
+    out = model.decoder_forward(
+        torch.randn_like(representation),
+        src_tokens,
+        features=src_features,
+        task_id=("separate_vocals", "separate_drums"),
+    )
+
+    assert out.shape == representation.shape
+    assert not hasattr(model, "latents")
+    assert hasattr(model, "encoder")
+    assert model.num_latents == model.data_length
+    assert model.bottleneck_channels == model.dim
+    assert model.use_fsq is False
+    assert model.decoder_input_channels == model.stft_channels
+    assert src_tokens.shape == (representation.shape[0], model.num_latents * 2, model.dim)
+    assert src_features
+    assert torch.count_nonzero(model.task_embedding.weight).item() > 0
+
+
 def test_hydra_targets_resolve_to_mossland_self_contained_classes():
     model_cls = get_class("scripts.mossland-codec.models.MosslandCodecTransformer")
     wrapper_cls = get_class("scripts.mossland-codec.wrapper.MosslandCodecTrainingWrapper")
@@ -64,7 +154,6 @@ def test_mossland_wrapper_only_consumes_task_payloads():
     assert "def _unpack_batch" not in source
     assert "def _task_from_payload" not in source
     assert "def _prepare_audio_batch" not in source
-    assert "random_mix" not in source
     assert "model.generate_waveform" in source
 
 
@@ -92,6 +181,52 @@ def test_training_wrapper_reindexes_datamodule_dataset_on_due_train_step():
 
     assert module.MosslandCodecTrainingWrapper._maybe_rebuild_data_index(wrapper, trainer) == 0
     assert calls == ["rebuild"]
+
+
+def test_training_wrapper_random_mix_is_reconstruction_only(monkeypatch):
+    module = importlib.import_module("scripts.mossland-codec.wrapper")
+    wrapper = SimpleNamespace(random_mix_prob=1.0)
+    src = torch.tensor(
+        [
+            [[0.2, 0.3]],
+            [[0.4, 0.5]],
+        ]
+    )
+    target = src.clone()
+
+    monkeypatch.setattr(module.torch, "randperm", lambda size, device=None: torch.tensor([1, 0]))
+
+    mixed_src, mixed_target, applied = module.MosslandCodecTrainingWrapper._maybe_random_mix(
+        wrapper,
+        src,
+        target,
+        ("reconstruct", "reconstruct"),
+    )
+
+    expected = torch.tensor(
+        [
+            [[0.6, 0.8]],
+            [[0.6, 0.8]],
+        ]
+    )
+    torch.testing.assert_close(mixed_src, expected)
+    torch.testing.assert_close(mixed_target, expected)
+    assert applied.item() == 1.0
+
+
+def test_training_wrapper_random_mix_rejects_non_reconstruction_tasks():
+    module = importlib.import_module("scripts.mossland-codec.wrapper")
+    wrapper = SimpleNamespace(random_mix_prob=1.0)
+    src = torch.zeros(2, 1, 4)
+    target = torch.zeros(2, 1, 4)
+
+    with pytest.raises(ValueError, match="reconstruction-only"):
+        module.MosslandCodecTrainingWrapper._maybe_random_mix(
+            wrapper,
+            src,
+            target,
+            ("reconstruct", "super_resolution"),
+        )
 
 
 def test_demo_callback_clears_cuda_cache_before_and_after_demo(monkeypatch, tmp_path):
@@ -220,9 +355,9 @@ def test_mossland_experiment_config_points_to_self_contained_codec():
     assert "source_root" not in cfg.data.dataset.dataset
     assert cfg.data.dataset.dataset.max_duration_seconds == 300
     assert cfg.data.dataset.dataset.crops_per_file == 16
-    assert cfg.data.dataset.dataset.length == 1000000
+    assert cfg.data.dataset.dataset.length == 10000000
     assert "index_data_every_step" not in cfg.data.dataset.dataset
-    assert cfg.wrapper.index_data_every_step is None
+    assert cfg.wrapper.index_data_every_step == 20000
     assert cfg.data.train_batch_size == 1
     assert cfg.data.train_batch_size * cfg.data.dataset.dataset.crops_per_file == 16
     assert cfg.data.num_workers == 6
@@ -233,6 +368,74 @@ def test_mossland_experiment_config_points_to_self_contained_codec():
     assert "task_weights" not in cfg.wrapper
     assert "low_sample_rate" not in cfg.wrapper
     assert "random_mix_prob" not in cfg.wrapper
+
+
+def test_a2a_config_routes_tasks_to_mixed_datasets_without_latent_bottleneck():
+    config_dir = str((Path.cwd() / "scripts/configs").resolve())
+    with initialize_config_dir(version_base=None, config_dir=config_dir):
+        cfg = compose(config_name="train", overrides=["experiment=codicodec-paper-repro-a2a"])
+
+    assert cfg.model._target_ == "scripts.mossland-a2a.models.MosslandA2ATransformer"
+    assert cfg.wrapper._target_ == "scripts.mossland-a2a.wrapper.MosslandA2ATrainingWrapper"
+    assert cfg.data.dataset._target_ == "scripts.mossland-codec.tasks.MosslandTaskRoutedDataset"
+    assert list(cfg.data.dataset.active_tasks) == [
+        "separate_vocals",
+        "separate_drums",
+        "separate_bass",
+        "separate_other",
+        "super_resolution",
+        "mono_to_stereo",
+    ]
+    assert cfg.data.dataset.datasets.separate_vocals._target_ == "scripts.data.datasets.Musdb18HqSeparationDataset"
+    assert cfg.data.dataset.datasets.super_resolution._target_ == "scripts.data.datasets.SampleDataset"
+    assert cfg.data.dataset.datasets.mono_to_stereo._target_ == "scripts.data.datasets.SampleDataset"
+    assert cfg.data.dataset.datasets.super_resolution.dirs[0].endswith("/NETEASE_SPIDER")
+    assert cfg.data.dataset.datasets.mono_to_stereo.dirs[0].endswith("/NETEASE_SPIDER")
+    assert "num_latents" not in cfg.model
+    assert "bottleneck_channels" not in cfg.model
+    assert cfg.model.num_more_latents == 0
+    assert cfg.model.use_fsq is False
+
+
+def test_mossland_a2a_config_reuses_codec_data_with_shallow_frontend():
+    config_dir = str((Path.cwd() / "scripts/configs").resolve())
+    with initialize_config_dir(version_base=None, config_dir=config_dir):
+        cfg = compose(config_name="train", overrides=["experiment=mossland-a2a"])
+
+    assert cfg.project_name == "mossland-a2a"
+    assert cfg.model._target_ == "scripts.mossland-a2a.models.MosslandA2ATransformer"
+    assert cfg.wrapper._target_ == "scripts.mossland-a2a.wrapper.MosslandA2ATrainingWrapper"
+    assert cfg.data.dataset._target_ == "scripts.mossland-codec.tasks.MosslandTaskDataset"
+    assert cfg.data.dataset.dataset._target_ == "scripts.data.datasets.PreparedSeparationDataset"
+    assert cfg.data.dataset.dataset.dirs == [
+        "/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER"
+    ]
+    assert list(cfg.data.dataset.active_tasks) == [
+        "reconstruct",
+        "separate_vocals",
+        "separate_accompaniment",
+        "super_resolution",
+        "mono_to_stereo",
+    ]
+    assert dict(cfg.data.dataset.task_weights) == {
+        "reconstruct": 6.0,
+        "separate_vocals": 0,
+        "separate_accompaniment": 0,
+        "super_resolution": 0,
+        "mono_to_stereo": 0,
+    }
+    assert cfg.data.dataset.dataset.crops_per_file == 10
+    assert cfg.data.train_batch_size == 1
+    assert cfg.model.dim == 768
+    assert list(cfg.model.task_names) == list(cfg.data.dataset.active_tasks)
+    assert list(cfg.model.frontend_multipliers_list) == [12]
+    assert list(cfg.model.frontend_layers_list) == [1]
+    assert list(cfg.model.frontend_encoder_layers_list) == [1]
+    assert list(cfg.model.frontend_freq_downsample_list) == []
+    assert "num_latents" not in cfg.model
+    assert "bottleneck_channels" not in cfg.model
+    assert cfg.model.num_more_latents == 0
+    assert cfg.model.use_fsq is False
 
 
 def test_task_payload_validation_rejects_raw_audio():
@@ -267,5 +470,6 @@ def test_model_only_has_task_conditioning_embeddings():
     )
 
     assert hasattr(model, "task_embedding")
+    assert torch.count_nonzero(model.task_embedding.weight).item() > 0
     assert not hasattr(model, "degradation_embedding")
     assert not hasattr(model, "channel_mode_embedding")

@@ -15,3 +15,6 @@ wandb/
 docs/memory/hook-events.log
 docs/memory/hook-reminders.log
 checkpoints/
+scripts/mossland-codec/eval_benchmark/data/
+scripts/mossland-codec/eval_benchmark/runs/
+!scripts/mossland-codec/eval_benchmark/data/.gitkeep

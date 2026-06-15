@@ -18,6 +18,23 @@ agent-code/scripts/agent/impact.sh
 
 报告变更文件，并建议对应的 `agent-code/scripts/agent/check.sh <scope>` 命令。
 
+## CodeGraph
+
+本机已安装 CodeGraph CLI `1.0.1`，路径为 `/root/.local/bin/codegraph`，standalone bundle 在 `/root/.codegraph/versions/v1.0.1`。Codex 全局 MCP 配置已由 `codegraph install --target codex --location global --yes` 写入；新 Codex 会话重启后可用 MCP 工具，当前或非 MCP 场景可直接用 shell 命令。
+
+代码导航、调用关系和 blast radius 优先使用：
+
+```sh
+codegraph status .
+codegraph query MosslandCodecTransformer
+codegraph explore "MosslandCodecTransformer generate_waveform"
+codegraph node scripts/mossland-codec/models.py
+codegraph callers generate_waveform
+codegraph impact MosslandCodecTransformer
+```
+
+注意：`codegraph init .` 已在本仓库创建 `.codegraph/`，该目录被 `.gitignore` 忽略。CodeGraph 1.0 会把 `.gitignore` 隐藏的嵌入式 git repo 也纳入索引，当前 `tmp/` 下 baseline/metric refs 可能出现在结果和 `.codegraph/errors.log` 中；判断 Mossland 主项目逻辑时优先看 `scripts/`、`tests/`、`agent-code/` 和 `docs/` 路径。
+
 ## 检查范围
 
 ```sh

@@ -8,6 +8,7 @@
 - `agent/commands.md`：用于验证的稳定命令入口。
 - `mossland-codec.md`：读取 Mossland 多任务 codec、separation 预处理和数据集接法时使用。
 - `evaluation-metrics.md`：调研 `scripts/mossland-codec/tasks.py` 中 5 个任务的评估指标、论文依据和可复用代码仓库时使用。
+- `eval-benchmark-report.md`：跟踪 Mossland eval pipeline、论文指标复现状态、真实运行结果和剩余缺口时使用。
 - `papers/README.md`：评估指标调研下载论文 PDF 的本地索引。
 - `memory/current.md`：新会话的短活跃上下文。
 - `memory/progress.md`：简洁的交接历史和下一步。

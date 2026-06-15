@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 tasks = importlib.import_module("scripts.mossland-codec.tasks")
 TASK_NAMES = tasks.TASK_NAMES
 MosslandTaskDataset = tasks.MosslandTaskDataset
+MosslandTaskRoutedDataset = tasks.MosslandTaskRoutedDataset
 build_task_batch = tasks.build_task_batch
 coerce_label = tasks.coerce_label
 
@@ -18,6 +19,19 @@ def test_task_registry_matches_mossland_document_tasks():
         "separate_accompaniment",
         "super_resolution",
         "mono_to_stereo",
+    )
+
+
+def test_supported_task_registry_keeps_four_stem_extensions():
+    assert tasks.SUPPORTED_TASK_NAMES == (
+        "reconstruct",
+        "separate_vocals",
+        "separate_accompaniment",
+        "super_resolution",
+        "mono_to_stereo",
+        "separate_drums",
+        "separate_bass",
+        "separate_other",
     )
 
 
@@ -153,10 +167,16 @@ def test_build_separation_tasks_use_offline_mixture_and_stems():
     payload = {
         "mixture": torch.full((2, 64), 0.1),
         "vocals": torch.full((2, 64), 0.2),
+        "drums": torch.full((2, 64), 0.4),
+        "bass": torch.full((2, 64), 0.5),
+        "other": torch.full((2, 64), 0.6),
         "accompaniment": torch.full((2, 64), 0.3),
     }
 
     vocal_task = build_task_batch(payload, "separate_vocals", sample_rate=48000)
+    drums_task = build_task_batch(payload, "separate_drums", sample_rate=48000)
+    bass_task = build_task_batch(payload, "separate_bass", sample_rate=48000)
+    other_task = build_task_batch(payload, "separate_other", sample_rate=48000)
     accompaniment_task = build_task_batch(
         payload,
         "separate_accompaniment",
@@ -165,6 +185,12 @@ def test_build_separation_tasks_use_offline_mixture_and_stems():
 
     torch.testing.assert_close(vocal_task.src, payload["mixture"])
     torch.testing.assert_close(vocal_task.target, payload["vocals"])
+    torch.testing.assert_close(drums_task.src, payload["mixture"])
+    torch.testing.assert_close(drums_task.target, payload["drums"])
+    torch.testing.assert_close(bass_task.src, payload["mixture"])
+    torch.testing.assert_close(bass_task.target, payload["bass"])
+    torch.testing.assert_close(other_task.src, payload["mixture"])
+    torch.testing.assert_close(other_task.target, payload["other"])
     torch.testing.assert_close(accompaniment_task.src, payload["mixture"])
     torch.testing.assert_close(accompaniment_task.target, payload["accompaniment"])
 
@@ -216,6 +242,47 @@ def test_coerce_label_handles_default_dataloader_collated_strings():
     payload, _ = next(iter(DataLoader(dataset, batch_size=1)))
 
     assert coerce_label(payload["task_id"]) == "reconstruct"
+
+
+def test_routed_dataset_collates_heterogeneous_source_info(monkeypatch):
+    class RelpathDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            return torch.ones(2, 64), {"relpath": "musdb-track.wav"}
+
+    class TimestampDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            return torch.zeros(2, 64), {"timestamps": torch.tensor([1.0, 2.0])}
+
+    task_ids = iter(("reconstruct", "mono_to_stereo"))
+    monkeypatch.setattr(
+        tasks,
+        "sample_task_id",
+        lambda active_tasks, task_weights=None: next(task_ids),
+    )
+
+    dataset = MosslandTaskRoutedDataset(
+        datasets={
+            "reconstruct": RelpathDataset(),
+            "mono_to_stereo": TimestampDataset(),
+        },
+        active_tasks=("reconstruct", "mono_to_stereo"),
+        sample_rate=48000,
+        length=2,
+    )
+
+    payload, info = next(iter(DataLoader(dataset, batch_size=2)))
+
+    assert payload["src"].shape == (2, 2, 64)
+    assert payload["target"].shape == (2, 2, 64)
+    assert set(info) == {"path", "relpath", "routed_task_id", "source_dataset"}
+    assert info["relpath"] == ["musdb-track.wav", ""]
+    assert info["routed_task_id"] == ["reconstruct", "mono_to_stereo"]
 
 
 def test_task_batch_flattens_dataloader_collated_crop_dimension():

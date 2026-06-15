@@ -83,6 +83,11 @@ def test_default_model_points_to_kimberley_vocal_model_files():
     assert prepare.DEFAULT_CHECKPOINT_NAME == "MelBandRoformer.ckpt"
 
 
+def test_audio_extensions_include_webm_and_mp4():
+    assert ".webm" in prepare.AUDIO_EXTENSIONS
+    assert ".mp4" in prepare.AUDIO_EXTENSIONS
+
+
 def test_load_model_config_reads_default_local_config(tmp_path, monkeypatch):
     config_path = tmp_path / prepare.DEFAULT_CONFIG_NAME
     config_path.write_text(

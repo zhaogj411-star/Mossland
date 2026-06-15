@@ -31,6 +31,99 @@ def _write_prepared_item(item_dir: Path):
     _write_placeholder(item_dir / "accompaniment.mp3")
 
 
+def _write_musdb_track(track_dir: Path):
+    for stem in ("mixture", "vocals", "drums", "bass", "other"):
+        _write_placeholder(track_dir / f"{stem}.wav")
+
+
+def test_musdb18hq_dataset_loads_four_stem_tasks(tmp_path, monkeypatch):
+    track_dir = tmp_path / "musdb18hq" / "train" / "Track A"
+    _write_musdb_track(track_dir)
+    loaded = []
+
+    def fake_load_stem(self, path):
+        loaded.append(path.name)
+        values = {
+            "mixture.wav": 1.0,
+            "vocals.wav": 2.0,
+            "drums.wav": 3.0,
+            "bass.wav": 4.0,
+            "other.wav": 5.0,
+        }
+        return torch.full((2, 16), values[path.name])
+
+    monkeypatch.setattr(datasets.Musdb18HqSeparationDataset, "_load_stem", fake_load_stem)
+
+    base = datasets.Musdb18HqSeparationDataset(
+        dirs=[tmp_path / "musdb18hq"],
+        splits=("train",),
+        sample_size=8,
+        sample_rate=44100,
+        random_crop=False,
+        crops_per_file=4,
+    )
+    dataset = tasks.MosslandTaskDataset(
+        base,
+        active_tasks=(
+            "separate_vocals",
+            "separate_drums",
+            "separate_bass",
+            "separate_other",
+        ),
+        task_weights={
+            "separate_vocals": 1.0,
+            "separate_drums": 0.0,
+            "separate_bass": 0.0,
+            "separate_other": 0.0,
+        },
+        sample_rate=44100,
+    )
+
+    payload, info = dataset[0]
+
+    assert loaded == ["mixture.wav", "vocals.wav"]
+    assert payload["task_id"] == (
+        "separate_vocals",
+        "separate_vocals",
+        "separate_vocals",
+        "separate_vocals",
+    )
+    assert payload["src"].shape == (4, 2, 8)
+    torch.testing.assert_close(payload["src"], torch.ones(4, 2, 8))
+    torch.testing.assert_close(payload["target"], torch.full((4, 2, 8), 2.0))
+    assert info["track_dir"] == str(track_dir)
+    assert (tmp_path / "musdb18hq" / "index.list").read_text(encoding="utf-8") == "train/Track A\n"
+
+
+def test_musdb18hq_dataset_can_aggregate_accompaniment(tmp_path, monkeypatch):
+    track_dir = tmp_path / "musdb18hq" / "train" / "Track A"
+    _write_musdb_track(track_dir)
+
+    def fake_load_stem(self, path):
+        values = {
+            "mixture.wav": 1.0,
+            "drums.wav": 0.2,
+            "bass.wav": 0.3,
+            "other.wav": 0.4,
+        }
+        return torch.full((2, 16), values[path.name])
+
+    monkeypatch.setattr(datasets.Musdb18HqSeparationDataset, "_load_stem", fake_load_stem)
+
+    dataset = datasets.Musdb18HqSeparationDataset(
+        dirs=[tmp_path / "musdb18hq"],
+        splits=("train",),
+        sample_size=8,
+        sample_rate=44100,
+        random_crop=False,
+    )
+
+    payload, _ = dataset.get_item_for_task(0, "separate_accompaniment")
+
+    assert set(payload) == {"audio", "mixture", "drums", "bass", "other", "accompaniment"}
+    torch.testing.assert_close(payload["accompaniment"], torch.full((2, 8), 0.9))
+
+
 def test_prepared_separation_dataset_reads_done_items_directly(tmp_path, monkeypatch):
     done_dir = tmp_path / "separated" / "audio" / "20260520" / "1001230"
     _write_placeholder(done_dir / "mixture.mp3")

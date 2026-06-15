@@ -1,0 +1,148 @@
+# @package _global_
+
+# CoDiCodec paper-style reconstruction run using the self-contained
+# scripts/mossland-codec implementation.
+#
+# This is the closest runnable Hydra experiment in this repository, not a claim
+# of bit-identical official training:
+# - the public Music2Latent training branch is Music2Latent, not CoDiCodec;
+# - CoDiCodec paper training uses MTG-Jamendo, DNS Challenge 4 speech/general
+#   audio, and M4Singer with weights [4, 1.5, 4, 1];
+# - this run intentionally uses NETEASE_SPIDER instead of the paper's
+#   MTG-Jamendo/DNS4/M4Singer mixture.
+
+project_name: codicodec-paper-repro
+checkpoint_monitor: loss
+tags: ["audioCodec", "codicodec", "paper-repro", "mossland-codec"]
+seed: 42
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 2000
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.mossland-codec.tasks.MosslandTaskDataset
+    dataset:
+      _target_: scripts.data.datasets.SampleDataset
+      dirs:
+        - /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER
+      # 64 STFT frames with hop=1024/window=2048. The paper text says 67,072
+      # samples, but the repository STFT framing code uses 66,560 samples.
+      sample_size: 66560
+      sample_rate: 44100
+      keywords: null
+      random_crop: true
+      num_channels: 2
+      audio_cache_dir: null
+      no_channel_dim: false
+      # Shared persistent file list. On the first launch, one rank builds this
+      # under a lock; all other ranks wait and then read it instead of each
+      # recursively scanning millions of files from shared storage.
+      index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER/netease_spider_audio.index.list
+      index_wait_timeout_seconds: 7200
+      # Effective per-GPU batch is train_batch_size * crops_per_file.
+      # 4-card local probe on PPU-ZW810: per-GPU effective batch 16 passes
+      # and uses about 76.5 GiB/card; 32 OOMs.
+      crops_per_file: 16
+    active_tasks:
+      - reconstruct
+    task_weights:
+      reconstruct: 1.0
+    sample_rate: 44100
+    low_sample_rate: 16000
+  pin_memory: true
+  val_split: 0.0001
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 16
+  prefetch_factor: 2
+
+trainer:
+  # Multinode launch overrides this with trainer.devices=${PET_NPROC_PER_NODE}.
+  # Default assumes one 8-card node.
+  devices: 8
+  precision: bf16-mixed
+  # Reconstruction-only training leaves some task/conditioning parameters unused
+  # on a given step, so DDP must allow unused parameters.
+  strategy: ddp_find_unused_parameters_true
+  log_every_n_steps: 10
+  # Paper sample budget: 2,000,000 steps * batch 20 = 40,000,000 samples.
+  # With 128 cards and per-GPU batch 16, global batch is 2048. A rounded
+  # 20,000-step run covers 40,960,000 samples, close to the paper's 40M.
+  max_steps: 20000
+  max_epochs: 10000000
+  min_epochs: 0
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1
+
+model:
+  _target_: scripts.mossland-codec.models.MosslandCodecTransformer
+  mixed_precision: true
+  stereo: true
+  default_time_prompt: 0.4
+  default_denoising_steps_parallel: 5
+  default_denoising_steps_ar: 2
+  hop: 1024
+  fac: 2
+  sample_rate: 44100
+  alpha_rescale: 0.65
+  beta_rescale: 0.34
+  dim: 512
+  head_dim: 128
+  mlp_mult: 4
+  pos_emb: learned
+  num_layers: 12
+  num_layers_encoder: 12
+  cond_channels: 512
+  num_latents: 128
+  num_more_latents: 8
+  fsq_levels: [11, 11, 11, 11]
+  frontend_base_channels: 64
+  frontend_multipliers_list: [1, 2, 4, 8]
+  frontend_layers_list: [3, 3, 3, 1]
+  frontend_encoder_layers_list: [3, 3, 3, 1]
+  frontend_freq_downsample_list: [0, 1, 0]
+  spec_length: 32
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  rho: 7.0
+  max_batch_size_encode: 64
+  max_batch_size_decode: 32
+  sigma_rescale: 0.8
+
+wrapper:
+  _target_: scripts.mossland-codec.wrapper.MosslandCodecTrainingWrapper
+  use_ema: true
+  ema_beta: 0.9999
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  optimizer_name: radam
+  lr_schedule: cosine_decay
+  # Keep the original 10k / 2M = 0.5% warmup ratio after scaling total steps.
+  lr_warmup_steps: 100
+  lr_schedule_total_steps: 20000
+  random_mix_prob: 0.5
+  fsq_dropout_prob: 0.75
+  consistency_step: 0.1
+  consistency_step_schedule: exponential
+  consistency_step_total_steps: 20000
+  consistency_step_end_exp: 2.0
+  sigma_sampling: lognormal
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_loss_delta: 0.00054
+  consistency_min_sigma_delta: 0.001
+  index_data_every_step: null
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.mossland-codec.wrapper.MosslandCodecTrainingCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 2
+    demo_every: 2000
+    sample_rate: 44100
+    use_ema: true
+    silence_seconds: 0.25

@@ -13,10 +13,8 @@ import torchaudio
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data import Dataset
 import lightning as pl
-from aeiou.core import is_silence
 from os import path
 from pathlib import Path
-from pedalboard.io import AudioFile
 from torchaudio import transforms as T
 from typing import Optional, Callable, List, Sequence
 import librosa
@@ -278,12 +276,16 @@ class SampleDataset(torch.utils.data.Dataset):
         num_channels=2,
         audio_cache_dir="/home/gjzhao/audio_cache/",
         crops_per_file=1,
+        index_file=None,
+        index_wait_timeout_seconds=3600,
     ):
         super().__init__()
         self.dirs = dirs
         self.filenames = []
         self.no_channel_dim = no_channel_dim
         self.crops_per_file = max(1, int(crops_per_file))
+        self.index_file = index_file
+        self.index_wait_timeout_seconds = int(index_wait_timeout_seconds)
         if audio_cache_dir is not None:
             os.makedirs(audio_cache_dir, exist_ok=True)
             self.audio_cache_dir = audio_cache_dir
@@ -314,10 +316,76 @@ class SampleDataset(torch.utils.data.Dataset):
         # # self.filenames = self.filenames[:1]
         # print(f"Found {len(self.filenames)} files")
 
-    def refresh_filenames(self):
-        self.filenames = []
+    def _read_index_file(self, index_file):
+        with open(index_file, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
+
+    def _write_index_file(self, index_file, filenames):
+        index_dir = os.path.dirname(index_file)
+        if index_dir:
+            os.makedirs(index_dir, exist_ok=True)
+        tmp_file = f"{index_file}.tmp.{os.getpid()}"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            for filename in filenames:
+                f.write(f"{filename}\n")
+        os.replace(tmp_file, index_file)
+
+    def _wait_for_index_file(self, index_file, lock_file):
+        start_time = time.time()
+        while True:
+            if os.path.exists(index_file):
+                return self._read_index_file(index_file)
+            if time.time() - start_time > self.index_wait_timeout_seconds:
+                try:
+                    os.remove(lock_file)
+                except FileNotFoundError:
+                    pass
+                return None
+            time.sleep(5)
+
+    def _scan_audio_filenames(self):
+        filenames = []
         for dir in self.dirs:
-            self.filenames.extend(get_audio_filenames(dir, None))
+            filenames.extend(get_audio_filenames(dir, None))
+        return filenames
+
+    def refresh_filenames(self):
+        if self.index_file is not None and os.path.exists(self.index_file):
+            self.filenames = self._read_index_file(self.index_file)
+            print(f"refresh:Loaded {len(self.filenames)} files from {self.index_file}")
+            return
+
+        if self.index_file is None:
+            self.filenames = self._scan_audio_filenames()
+            print(f"refresh:Found {len(self.filenames)} files")
+            return
+
+        index_dir = os.path.dirname(self.index_file)
+        if index_dir:
+            os.makedirs(index_dir, exist_ok=True)
+        lock_file = f"{self.index_file}.lock"
+        while True:
+            try:
+                lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                filenames = self._wait_for_index_file(self.index_file, lock_file)
+                if filenames is not None:
+                    self.filenames = filenames
+                    print(f"refresh:Loaded {len(self.filenames)} files from {self.index_file}")
+                    return
+
+        try:
+            with os.fdopen(lock_fd, "w", encoding="utf-8") as f:
+                f.write(f"pid={os.getpid()}\n")
+                f.write(f"created_at={time.time()}\n")
+            self.filenames = self._scan_audio_filenames()
+            self._write_index_file(self.index_file, self.filenames)
+        finally:
+            try:
+                os.remove(lock_file)
+            except FileNotFoundError:
+                pass
         # self.filenames = self.filenames[:2]
         print(f"refresh:Found {len(self.filenames)} files")
 
@@ -488,6 +556,267 @@ def _probe_audio_duration_seconds_ffprobe(path_: Path) -> float | None:
     if duration <= 0:
         return None
     return duration
+
+
+class Musdb18HqSeparationDataset(Dataset):
+    """Read MUSDB18-HQ wav stems for source-separation training."""
+
+    STEM_NAMES = ("mixture", "vocals", "drums", "bass", "other")
+    TARGET_STEMS = ("vocals", "drums", "bass", "other", "accompaniment")
+
+    def __init__(
+        self,
+        dirs,
+        splits: Sequence[str] = ("train",),
+        index_file=None,
+        sample_size: int = 65536,
+        sample_rate: int = 44100,
+        random_crop: bool = True,
+        num_channels: int = 2,
+        strict: bool = False,
+        scan_fallback: bool = True,
+        crops_per_file: int = 1,
+        length: int | None = None,
+    ):
+        super().__init__()
+        self.dirs = (
+            [Path(dirs)]
+            if isinstance(dirs, (str, os.PathLike))
+            else [Path(item) for item in dirs]
+        )
+        self.splits = tuple(splits)
+        self.sample_size = int(sample_size)
+        self.sample_rate = int(sample_rate)
+        self.random_crop = bool(random_crop)
+        self.num_channels = int(num_channels)
+        self.strict = bool(strict)
+        self.scan_fallback = bool(scan_fallback)
+        self.crops_per_file = max(1, int(crops_per_file))
+        self.length = _normalize_positive_int_or_none(length, "length")
+        if index_file is None:
+            self.index_sources = [(root, root / "index.list") for root in self.dirs]
+        else:
+            index_files = (
+                [Path(index_file)]
+                if isinstance(index_file, (str, os.PathLike))
+                else [Path(item) for item in index_file]
+            )
+            if len(index_files) == 1:
+                self.index_sources = [(self.dirs[0], index_files[0])]
+            elif len(index_files) == len(self.dirs):
+                self.index_sources = list(zip(self.dirs, index_files))
+            else:
+                raise ValueError("index_file must be a path or match dirs length")
+        self.track_dirs: list[Path] = []
+        self.refresh_items()
+
+    def refresh_items(self, rebuild_index: bool = False):
+        track_dirs = []
+        for root, index_path in self.index_sources:
+            if rebuild_index:
+                scanned = self._scan_track_dirs(root)
+                self._write_index(root, index_path, scanned)
+                track_dirs.extend(scanned)
+                continue
+            if index_path.exists():
+                track_dirs.extend(self._read_index(root, index_path))
+                continue
+            if self.scan_fallback:
+                scanned = self._scan_track_dirs(root)
+                self._write_index(root, index_path, scanned)
+                track_dirs.extend(scanned)
+        self.track_dirs = sorted(set(track_dirs))
+        print(f"refresh:Found {len(self.track_dirs)} MUSDB18-HQ tracks")
+
+    def rebuild_index(self):
+        self.refresh_items(rebuild_index=True)
+
+    def _scan_track_dirs(self, root: Path) -> list[Path]:
+        track_dirs = []
+        for split in self.splits:
+            split_dir = root / split
+            if not split_dir.exists():
+                continue
+            for track_dir in sorted(path_ for path_ in split_dir.iterdir() if path_.is_dir()):
+                if all((track_dir / f"{stem}.wav").exists() for stem in self.STEM_NAMES):
+                    track_dirs.append(track_dir)
+        return track_dirs
+
+    def _read_index(self, root: Path, index_path: Path) -> list[Path]:
+        try:
+            lines = index_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        track_dirs = []
+        for line in lines:
+            value = line.strip()
+            if not value:
+                continue
+            path_ = Path(value)
+            track_dirs.append(path_ if path_.is_absolute() else root / path_)
+        return track_dirs
+
+    def _write_index(self, root: Path, index_path: Path, track_dirs: list[Path]) -> None:
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for track_dir in sorted(set(track_dirs)):
+            try:
+                lines.append(str(track_dir.relative_to(root)))
+            except ValueError:
+                lines.append(str(track_dir))
+        tmp_path = index_path.with_name(
+            f"{index_path.name}.{os.getpid()}.{id(self)}.tmp"
+        )
+        tmp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        os.replace(tmp_path, index_path)
+
+    def __len__(self):
+        return self.length if self.length is not None else len(self.track_dirs)
+
+    def _load_stem(self, path_: Path) -> torch.Tensor:
+        audio, in_sample_rate = torchaudio.load(str(path_))
+        audio = audio.float()
+        if in_sample_rate != self.sample_rate:
+            audio = T.Resample(in_sample_rate, self.sample_rate)(audio)
+        if self.num_channels == 1:
+            audio = audio.mean(dim=0, keepdim=True)
+        elif audio.shape[0] == 1 and self.num_channels == 2:
+            audio = audio.repeat_interleave(2, dim=0)
+        elif audio.shape[0] > self.num_channels:
+            audio = audio[: self.num_channels]
+        return audio.clamp(-1.0, 1.0)
+
+    def _crop_start(self, audio: torch.Tensor) -> int:
+        max_start = max(0, int(audio.shape[-1]) - self.sample_size)
+        if not self.random_crop or max_start <= 0:
+            return 0
+        return random.randint(0, max_start)
+
+    def _stem_names_for_task(self, task_id: str | None) -> tuple[str, ...]:
+        if task_id is None:
+            return self.STEM_NAMES
+        if task_id.startswith("separate_"):
+            stem_name = task_id.removeprefix("separate_")
+            if stem_name not in self.TARGET_STEMS:
+                raise ValueError(f"Unsupported MUSDB stem task: {task_id}")
+            if stem_name == "accompaniment":
+                return ("mixture", "drums", "bass", "other", "accompaniment")
+            return ("mixture", stem_name)
+        return ("mixture",)
+
+    def _stem_names_for_tasks(self, task_ids: Sequence[str]) -> tuple[str, ...]:
+        stem_names = ["mixture"]
+        for task_id in task_ids:
+            for stem_name in self._stem_names_for_task(task_id):
+                if stem_name not in stem_names:
+                    stem_names.append(stem_name)
+        return tuple(stem_names)
+
+    def _relative_track_path(self, track_dir: Path) -> str:
+        for root in self.dirs:
+            try:
+                return str(track_dir.relative_to(root))
+            except ValueError:
+                continue
+        return track_dir.name
+
+    def _load_item(
+        self,
+        track_dir: Path,
+        task_id: str | None = None,
+        task_ids: Sequence[str] | None = None,
+    ):
+        if task_ids is None:
+            stem_names = self._stem_names_for_task(task_id)
+            crop_count = self.crops_per_file
+        else:
+            task_ids = tuple(task_ids)
+            if not task_ids:
+                raise ValueError("task_ids must not be empty")
+            stem_names = self._stem_names_for_tasks(task_ids)
+            crop_count = len(task_ids)
+        load_stem_names = tuple(
+            stem_name for stem_name in stem_names if stem_name != "accompaniment"
+        )
+        stems = {
+            stem_name: self._load_stem(track_dir / f"{stem_name}.wav")
+            for stem_name in load_stem_names
+        }
+        if "accompaniment" in stem_names:
+            stems["accompaniment"] = (
+                _pad_or_crop_to_length(stems["drums"], stems["mixture"].shape[-1])
+                + _pad_or_crop_to_length(stems["bass"], stems["mixture"].shape[-1])
+                + _pad_or_crop_to_length(stems["other"], stems["mixture"].shape[-1])
+            ).clamp(-1.0, 1.0)
+
+        mixture = stems["mixture"]
+        starts = [self._crop_start(mixture) for _ in range(crop_count)]
+        cropped_stems = {
+            stem_name: torch.stack(
+                [
+                    _pad_or_crop_to_length(stem_audio[..., start : start + self.sample_size], self.sample_size)
+                    for start in starts
+                ],
+                dim=0,
+            )
+            for stem_name, stem_audio in stems.items()
+        }
+        if crop_count == 1:
+            cropped_stems = {
+                stem_name: stem_audio[0]
+                for stem_name, stem_audio in cropped_stems.items()
+            }
+
+        mixture = cropped_stems["mixture"]
+        payload = {"audio": mixture, "mixture": mixture}
+        for stem_name in cropped_stems:
+            if stem_name != "mixture":
+                payload[stem_name] = cropped_stems[stem_name]
+        sample_start = starts[0] if crop_count == 1 else torch.tensor(starts, dtype=torch.int64)
+        sample_end = sample_start + self.sample_size
+        info = {
+            "path": str(track_dir / "mixture.wav"),
+            "relpath": self._relative_track_path(track_dir),
+            "track_dir": str(track_dir),
+            "sample_start": sample_start,
+            "sample_end": sample_end,
+            "crops_per_file": crop_count,
+        }
+        if task_ids is not None:
+            info["task_ids"] = task_ids
+        return payload, info
+
+    def __getitem__(self, index):
+        return self.get_item_for_task(index, None)
+
+    def get_item_for_task(self, index, task_id: str | None):
+        while self.track_dirs:
+            index = index % len(self.track_dirs)
+            track_dir = self.track_dirs[index]
+            try:
+                return self._load_item(track_dir, task_id=task_id)
+            except Exception as exc:
+                if self.strict or len(self.track_dirs) <= 1:
+                    raise
+                print(f"Couldn't load MUSDB18-HQ track {track_dir}: {exc}")
+                self.track_dirs.pop(index)
+                index = random.randrange(len(self.track_dirs))
+        raise RuntimeError("Musdb18HqSeparationDataset 没有可用 track")
+
+    def get_item_for_tasks(self, index, task_ids: Sequence[str]):
+        task_ids = tuple(task_ids)
+        while self.track_dirs:
+            index = index % len(self.track_dirs)
+            track_dir = self.track_dirs[index]
+            try:
+                return self._load_item(track_dir, task_ids=task_ids)
+            except Exception as exc:
+                if self.strict or len(self.track_dirs) <= 1:
+                    raise
+                print(f"Couldn't load MUSDB18-HQ track {track_dir}: {exc}")
+                self.track_dirs.pop(index)
+                index = random.randrange(len(self.track_dirs))
+        raise RuntimeError("Musdb18HqSeparationDataset 没有可用 track")
 
 
 class PreparedSeparationDataset(Dataset):
@@ -836,6 +1165,14 @@ class Experiment_Dataset(pl.LightningDataModule):
         # 用于数据下载等操作
         pass
 
+    def _loader_worker_kwargs(self):
+        if self.num_workers <= 0:
+            return {}
+        return {
+            "prefetch_factor": self.prefetch_factor,
+            "persistent_workers": True,
+        }
+
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
@@ -843,8 +1180,7 @@ class Experiment_Dataset(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             shuffle=True,
-            prefetch_factor=self.prefetch_factor,
-            persistent_workers=True,
+            **self._loader_worker_kwargs(),
         )
 
     def val_dataloader(self):
@@ -856,6 +1192,7 @@ class Experiment_Dataset(pl.LightningDataModule):
             batch_size=self.val_batch_size,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            **self._loader_worker_kwargs(),
         )
 
     def test_dataloader(self):
@@ -867,6 +1204,7 @@ class Experiment_Dataset(pl.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=False,
             pin_memory=self.pin_memory,
+            **self._loader_worker_kwargs(),
         )
 
 

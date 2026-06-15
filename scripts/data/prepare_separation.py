@@ -40,8 +40,10 @@ AUDIO_EXTENSIONS = {
     ".flac",
     ".m4a",
     ".mp3",
+    ".mp4",
     ".ogg",
     ".opus",
+    ".webm",
     ".wav",
 }
 
@@ -392,7 +394,14 @@ def write_metadata(
 
 
 def _load_audio_with_source_info(path: Path, sample_rate: int, num_channels: int) -> LoadedAudio:
-    audio, in_sample_rate = torchaudio.load(str(path))
+    try:
+        audio, in_sample_rate = torchaudio.load(str(path))
+    except Exception as exc:
+        loaded = _load_audio_with_ffmpeg(path, sample_rate, num_channels)
+        if loaded is None:
+            raise exc
+        return loaded
+
     source_num_channels = int(audio.shape[0])
     audio = audio.float()
     if in_sample_rate != sample_rate:
@@ -408,6 +417,104 @@ def _load_audio_with_source_info(path: Path, sample_rate: int, num_channels: int
         source_sample_rate=int(in_sample_rate),
         source_num_channels=source_num_channels,
     )
+
+
+def _load_audio_with_ffmpeg(path: Path, sample_rate: int, num_channels: int) -> LoadedAudio | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return None
+
+    source_sample_rate, source_num_channels = _probe_audio_stream_info(path)
+    command = [
+        ffmpeg,
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-vn",
+        "-f",
+        "f32le",
+        "-acodec",
+        "pcm_f32le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        str(num_channels),
+        "pipe:1",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0 or not completed.stdout:
+        return None
+
+    decoded = np.frombuffer(completed.stdout, dtype=np.float32).copy()
+    if decoded.size == 0:
+        return None
+    usable = decoded.size - (decoded.size % num_channels)
+    if usable <= 0:
+        return None
+    audio = torch.from_numpy(decoded[:usable].reshape(-1, num_channels).T).float()
+    return LoadedAudio(
+        audio=audio.contiguous().clamp(-1.0, 1.0),
+        source_sample_rate=int(source_sample_rate or sample_rate),
+        source_num_channels=int(source_num_channels or num_channels),
+    )
+
+
+def _probe_audio_stream_info(path: Path | str) -> tuple[int | None, int | None]:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None, None
+    try:
+        completed = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=sample_rate,channels",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if completed.returncode != 0:
+        return None, None
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return None, None
+    streams = payload.get("streams")
+    if not isinstance(streams, list) or not streams:
+        return None, None
+    stream = streams[0]
+    if not isinstance(stream, Mapping):
+        return None, None
+    sample_rate = stream.get("sample_rate")
+    channels = stream.get("channels")
+    try:
+        parsed_sample_rate = int(sample_rate) if sample_rate is not None else None
+    except (TypeError, ValueError):
+        parsed_sample_rate = None
+    try:
+        parsed_channels = int(channels) if channels is not None else None
+    except (TypeError, ValueError):
+        parsed_channels = None
+    return parsed_sample_rate, parsed_channels
 
 
 def _normalize_max_duration_seconds(max_duration_seconds: float | int | None) -> float | None:

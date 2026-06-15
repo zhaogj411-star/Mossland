@@ -16,6 +16,12 @@ TASK_NAMES = (
     "super_resolution",
     "mono_to_stereo",
 )
+EXTRA_SEPARATION_TASK_NAMES = (
+    "separate_drums",
+    "separate_bass",
+    "separate_other",
+)
+SUPPORTED_TASK_NAMES = TASK_NAMES + EXTRA_SEPARATION_TASK_NAMES
 SUPER_RESOLUTION_RATE_BUCKETS = (
     8000,
     11025,
@@ -265,7 +271,7 @@ def build_task_batch(
     sample_rate: int,
     low_sample_rate: int | Sequence[int] = 16000,
 ) -> MosslandTaskBatch:
-    if task_id not in TASK_NAMES:
+    if task_id not in SUPPORTED_TASK_NAMES:
         raise ValueError(f"Unsupported task_id={task_id!r}")
 
     if task_id == "reconstruct":
@@ -294,12 +300,12 @@ def build_task_batch(
     if not isinstance(payload, Mapping):
         raise TypeError(f"{task_id} requires a mapping payload with mixture/stem tensors")
 
-    if task_id == "separate_vocals":
-        src, target = _mix_from_stems(payload, "vocals")
+    if task_id.startswith("separate_"):
+        stem_name = task_id.removeprefix("separate_")
+        src, target = _mix_from_stems(payload, stem_name)
         return MosslandTaskBatch(src=src, target=target, task_id=task_id)
 
-    src, target = _mix_from_stems(payload, "accompaniment")
-    return MosslandTaskBatch(src=src, target=target, task_id=task_id)
+    raise ValueError(f"Unsupported task_id={task_id!r}")
 
 
 def _select_crop_payload(payload, crop_index: int, crop_count: int):
@@ -351,7 +357,7 @@ def sample_task_id(active_tasks: Sequence[str], task_weights: Mapping[str, float
     if not active_tasks:
         raise ValueError("active_tasks must not be empty")
     for task in active_tasks:
-        if task not in TASK_NAMES:
+        if task not in SUPPORTED_TASK_NAMES:
             raise ValueError(f"Unsupported task_id={task!r}")
     if task_weights is None:
         return random.choice(tuple(active_tasks))
@@ -359,6 +365,22 @@ def sample_task_id(active_tasks: Sequence[str], task_weights: Mapping[str, float
     if sum(weights) <= 0:
         return random.choice(tuple(active_tasks))
     return random.choices(tuple(active_tasks), weights=weights, k=1)[0]
+
+
+def _info_string_value(info: Mapping, key: str, default: str = "") -> str:
+    if key not in info:
+        return default
+    value = info[key]
+    if value is None:
+        return default
+    if torch.is_tensor(value):
+        flat = value.detach().cpu().reshape(-1)
+        if flat.numel() == 0:
+            return default
+        if flat.numel() == 1:
+            return str(flat[0].item())
+        return str(tuple(flat.tolist()))
+    return str(value)
 
 
 class MosslandTaskDataset(Dataset):
@@ -418,4 +440,66 @@ class MosslandTaskDataset(Dataset):
             sample_rate=self.sample_rate,
             low_sample_rate=self.low_sample_rate,
         )
+        return task.to_payload(), info
+
+
+class MosslandTaskRoutedDataset(Dataset):
+    """Sample tasks from one training stream while routing each task to its dataset."""
+
+    def __init__(
+        self,
+        datasets: Mapping[str, Dataset],
+        active_tasks: Sequence[str],
+        task_weights: Mapping[str, float] | None = None,
+        sample_rate: int = 48000,
+        low_sample_rate: int | Sequence[int] = 16000,
+        length: int | None = None,
+    ):
+        if not datasets:
+            raise ValueError("datasets must not be empty")
+        self.datasets = dict(datasets)
+        self.active_tasks = tuple(active_tasks)
+        self.task_weights = dict(task_weights or {})
+        self.sample_rate = sample_rate
+        self.low_sample_rate = low_sample_rate
+        for task in self.active_tasks:
+            if task not in self.datasets:
+                raise ValueError(f"missing dataset route for task {task!r}")
+        if length is None:
+            self.length = max(len(dataset) for dataset in self.datasets.values())
+        else:
+            self.length = int(length)
+            if self.length <= 0:
+                raise ValueError("length must be positive")
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, index):
+        task_id = sample_task_id(self.active_tasks, self.task_weights)
+        dataset = self.datasets[task_id]
+        dataset_index = index % len(dataset)
+        get_item_for_task = getattr(dataset, "get_item_for_task", None)
+        if get_item_for_task is not None:
+            item = get_item_for_task(dataset_index, task_id)
+        else:
+            item = dataset[dataset_index]
+        if isinstance(item, tuple) and len(item) == 2:
+            payload, info = item
+        else:
+            payload, info = item, {}
+        task = build_task_batch(
+            payload,
+            task_id,
+            sample_rate=self.sample_rate,
+            low_sample_rate=self.low_sample_rate,
+        )
+        raw_info = info if isinstance(info, Mapping) else {}
+        path = _info_string_value(raw_info, "path")
+        info = {
+            "path": path,
+            "relpath": _info_string_value(raw_info, "relpath", path),
+            "routed_task_id": task_id,
+            "source_dataset": type(dataset).__name__,
+        }
         return task.to_payload(), info
