@@ -1,7 +1,7 @@
 
 python -m scripts.unwrap experiment=mossland-codec  \
- experiment_ckpt_path=/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-09_16-52-30/checkpoints/last.ckpt \
- output_path=./ckpt/mossland-codec0610 \
+ experiment_ckpt_path=/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-12_12-46-36/checkpoints/last.ckpt \
+ output_path=./ckpt/mossland-codec0613 \
  deepspeed=false \
  export_ema=true
 # resume_from_ckpt=/home/gjzhao/workspace2024/heartstrings-version4/logs/vae_113/runs/2024-09-24_13-16-53/checkpoints/last.ckpt

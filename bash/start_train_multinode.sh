@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland}"
-PYTHON_BIN="${PYTHON_BIN:-/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/envs/main_env/bin/python}"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 EXPERIMENT="${EXPERIMENT:-mossland-codec}"
 
 : "${PET_NPROC_PER_NODE:?PET_NPROC_PER_NODE is required}"
