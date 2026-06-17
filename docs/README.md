@@ -10,6 +10,7 @@
 - `evaluation-metrics.md`：调研 `scripts/mossland-codec/tasks.py` 中 5 个任务的评估指标、论文依据和可复用代码仓库时使用。
 - `eval-benchmark-report.md`：跟踪 Mossland eval pipeline、论文指标复现状态、真实运行结果和剩余缺口时使用。
 - `superpowers/specs/2026-06-17-mossland-codec-rvq-design.md`：实现 `scripts/mossland-codec` 从 FSQ 改为 512 维 chunk-level RVQ 前读取，包含 RVQ 码率、张量接口、训练策略和推理接口设计。
+- `superpowers/plans/2026-06-17-mossland-codec-rvq-implementation.md`：执行 Mossland codec RVQ 改造前读取，包含量化模块、模型接入、训练 wrapper、推理接口、配置文档和验证任务拆分。
 - `papers/README.md`：评估指标调研下载论文 PDF 的本地索引。
 - `memory/current.md`：新会话的短活跃上下文。
 - `memory/progress.md`：简洁的交接历史和下一步。
