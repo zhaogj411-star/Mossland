@@ -9,8 +9,9 @@
 - `mossland-codec.md`：读取 Mossland 多任务 codec、separation 预处理和数据集接法时使用。
 - `evaluation-metrics.md`：调研 `scripts/mossland-codec/tasks.py` 中 5 个任务的评估指标、论文依据和可复用代码仓库时使用。
 - `eval-benchmark-report.md`：跟踪 Mossland eval pipeline、论文指标复现状态、真实运行结果和剩余缺口时使用。
-- `superpowers/specs/2026-06-17-mossland-codec-rvq-design.md`：实现 `scripts/mossland-codec` 从 FSQ 改为 512 维 chunk-level RVQ 前读取，包含 RVQ 码率、张量接口、训练策略和推理接口设计。
-- `superpowers/plans/2026-06-17-mossland-codec-rvq-implementation.md`：执行 Mossland codec RVQ 改造前读取，包含量化模块、模型接入、训练 wrapper、推理接口、配置文档和验证任务拆分。
+- `superpowers/specs/2026-06-17-mossland-codec-time-aligned-rvq-design.md`：当前有效的 Mossland codec RVQ 设计，使用 local Transformer 输出 25Hz 时间对齐 token，连续表征为 32 维/token，离散表征为每 token 16 层 RVQ。
+- `superpowers/specs/2026-06-17-mossland-codec-rvq-design.md`：已废弃的 512 维 chunk-summary RVQ 设计；仅用于了解为什么该方案不能解决 time alignment。
+- `superpowers/plans/2026-06-17-mossland-codec-rvq-implementation.md`：已废弃的 chunk-summary RVQ 实施计划；不要执行。
 - `papers/README.md`：评估指标调研下载论文 PDF 的本地索引。
 - `memory/current.md`：新会话的短活跃上下文。
 - `memory/progress.md`：简洁的交接历史和下一步。

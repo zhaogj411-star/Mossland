@@ -1,5 +1,7 @@
 # Mossland Codec RVQ Bottleneck Implementation Plan
 
+> **Superseded:** Do not execute this plan. It implements chunk-summary RVQ on existing learned-query latents and does not solve the time-alignment issue. Use the revised time-aligned local-Transformer RVQ design instead: `docs/superpowers/specs/2026-06-17-mossland-codec-time-aligned-rvq-design.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `scripts/mossland-codec` FSQ with a chunk-level RVQ bottleneck using `codebook_size=1024` and max `num_quantizers=256`, while supporting DAC-style dynamic active codebook count and preserving the continuous path and existing decoder latent layout.

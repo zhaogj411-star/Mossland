@@ -1,5 +1,7 @@
 # Mossland Codec RVQ Bottleneck Design
 
+> **Superseded:** Do not implement this chunk-summary RVQ design. It was replaced by `docs/superpowers/specs/2026-06-17-mossland-codec-time-aligned-rvq-design.md` after the user clarified that the current learned-query Transformer summary is the source of the time-alignment problem.
+
 ## 背景
 
 用户希望把 `scripts/mossland-codec` 的 FSQ 离散瓶颈替换为 RVQ，并让 RVQ 可以像现有 FSQ 一样参与训练。现有模型每个 `spec_length` chunk 产生 `num_latents=128` 个 bottleneck latent，每个 latent 是 `len(fsq_levels)=4` 维；因此一个 chunk 的离散瓶颈总维度是 `128 * 4 = 512`。
