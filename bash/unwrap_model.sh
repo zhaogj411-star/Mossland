@@ -1,9 +1,10 @@
 
 python -m scripts.unwrap experiment=mossland-codec  \
- experiment_ckpt_path=/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-12_12-46-36/checkpoints/last.ckpt \
- output_path=./ckpt/mossland-codec0613 \
+ experiment_ckpt_path=/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-17_14-38-36/checkpoints/last.ckpt \
+ output_path=./ckpt/mosslandcodec0617 \
  deepspeed=false \
- export_ema=true
+ export_ema=true \
+ load_strict=true
 # resume_from_ckpt=/home/gjzhao/workspace2024/heartstrings-version4/logs/vae_113/runs/2024-09-24_13-16-53/checkpoints/last.ckpt
 
 # python -m scripts.unwrap experiment=compose_music_net_ultra \

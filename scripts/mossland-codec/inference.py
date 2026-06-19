@@ -82,7 +82,16 @@ class EncoderDecoder:
             gen = load_model(ckpt_path=ckpt_path, config_path=config_path)
         self.gen = gen.to(self.device).eval()
 
-    def encode(self, path_or_audio, max_batch_size=None, discrete=False, preprocess_on_gpu=True, desired_channels=64, fix_batch_size=False):
+    def encode(
+        self,
+        path_or_audio,
+        max_batch_size=None,
+        discrete=False,
+        preprocess_on_gpu=True,
+        desired_channels=64,
+        fix_batch_size=False,
+        n_quantizers: int | None = None,
+    ):
         '''
         path_or_audio: path of audio sample to encode or numpy array of waveform to encode
         max_batch_size: maximum inference batch size for encoding: tune it depending on the available GPU memory
@@ -93,6 +102,50 @@ class EncoderDecoder:
         '''
         if max_batch_size is None:
             max_batch_size = self.max_batch_size_encode
+        if self.gen.bottleneck_type == "causal_rvq":
+            if discrete:
+                return encode_audio_inference(
+                    path_or_audio,
+                    self,
+                    max_batch_size,
+                    device=self.device,
+                    preprocess_on_gpu=preprocess_on_gpu,
+                    fix_batch_size=fix_batch_size,
+                    output="token_codes",
+                    n_quantizers=n_quantizers,
+                )
+            latents = encode_audio_inference(
+                path_or_audio,
+                self,
+                max_batch_size,
+                device=self.device,
+                preprocess_on_gpu=preprocess_on_gpu,
+                fix_batch_size=fix_batch_size,
+                output="token_latents",
+            )
+            return torch.atanh(latents.clamp(-0.999999, 0.999999)) / self.sigma_rescale
+        if self.gen.bottleneck_type == "packed_rvq":
+            if discrete:
+                return encode_audio_inference(
+                    path_or_audio,
+                    self,
+                    max_batch_size,
+                    device=self.device,
+                    preprocess_on_gpu=preprocess_on_gpu,
+                    fix_batch_size=fix_batch_size,
+                    output="codes",
+                    n_quantizers=n_quantizers,
+                )
+            packed = encode_audio_inference(
+                path_or_audio,
+                self,
+                max_batch_size,
+                device=self.device,
+                preprocess_on_gpu=preprocess_on_gpu,
+                fix_batch_size=fix_batch_size,
+                output="packed",
+            )
+            return torch.atanh(packed.clamp(-0.999999, 0.999999)) / self.sigma_rescale
         if discrete:
             # For discrete encoding, always quantize before extracting codebook indices
             latents = encode_audio_inference(path_or_audio, self, max_batch_size, device=self.device, dont_quantize=False, preprocess_on_gpu=preprocess_on_gpu, fix_batch_size=fix_batch_size)
@@ -117,7 +170,52 @@ class EncoderDecoder:
         discrete = is_integer(latent)
         if max_batch_size is None:
             max_batch_size = self.max_batch_size_decode
-        if discrete:
+        if self.gen.bottleneck_type == "causal_rvq":
+            if isinstance(latent, np.ndarray):
+                latent = torch.from_numpy(latent)
+            if discrete:
+                codes = latent.to(device=self.device if preprocess_on_gpu else "cpu", dtype=torch.long)
+                if codes.ndim == 2:
+                    codes = codes.unsqueeze(0)
+                latents = self.gen.latent_from_codes(codes.to(next(self.gen.parameters()).device))
+            else:
+                token_latents = latent
+                if token_latents.ndim == 2:
+                    token_latents = token_latents.unsqueeze(0)
+                token_latents = torch.tanh(token_latents * self.sigma_rescale)
+                latents = token_latents.transpose(1, 2).contiguous().to(next(self.gen.parameters()).device)
+            chunks = latents.shape[-2] // self.gen.num_latents
+            latents = latents[:, : chunks * self.gen.num_latents, :]
+            latents = latents.reshape(
+                latents.shape[0],
+                chunks,
+                self.gen.num_latents,
+                self.gen.bottleneck_channels,
+            )
+        elif self.gen.bottleneck_type == "packed_rvq":
+            if isinstance(latent, np.ndarray):
+                latent = torch.from_numpy(latent)
+            if discrete:
+                codes = latent.to(device=self.device if preprocess_on_gpu else "cpu", dtype=torch.long)
+                if codes.ndim == 2:
+                    codes = codes.unsqueeze(0)
+                unpacked = self.gen.latent_from_codes(codes.to(next(self.gen.parameters()).device))
+            else:
+                packed = latent
+                if packed.ndim == 2:
+                    packed = packed.unsqueeze(0)
+                packed = torch.tanh(packed * self.sigma_rescale)
+                unpacked = self.gen.unpack_chunk_latents(
+                    packed.to(next(self.gen.parameters()).device)
+                )
+            chunks = unpacked.shape[-2] // self.gen.num_latents
+            latents = unpacked.reshape(
+                unpacked.shape[0],
+                chunks,
+                self.gen.num_latents,
+                self.gen.bottleneck_channels,
+            )
+        elif discrete:
             latents = self.gen.fsq.indexes_to_codes(latent)
         else:
             # invert rescaling and transform for continuous latents
@@ -165,8 +263,47 @@ class EncoderDecoder:
 #   device: device to run the model on
 # Returns:
 #   latent: compressed latent representation with shape [audio_channels, latent_length, dim]
+def _restore_chunk_major_output(latent, batch_size: int, squeeze_batch_dimensions: bool, output: str):
+    if output == "token_latents":
+        latent = latent.transpose(1, 2).contiguous()
+        if latent.shape[0] == 1 and squeeze_batch_dimensions:
+            latent = latent.squeeze(0)
+        return latent
+
+    if output == "token_codes":
+        if latent.shape[0] == 1 and squeeze_batch_dimensions:
+            latent = latent.squeeze(0)
+        return latent
+
+    if output in {"packed", "codes"}:
+        num_chunks = latent.shape[0] // batch_size
+        latent = latent.reshape(num_chunks, batch_size, *latent.shape[1:])
+        if latent.shape[-1] == 1:
+            latent = latent.squeeze(-1)
+        latent = latent.permute(1, 2, 0).contiguous()
+        if latent.shape[0] == 1 and squeeze_batch_dimensions:
+            latent = latent.squeeze(0)
+        return latent
+
+    latent = torch.split(latent, batch_size, 0)
+    latent = torch.stack(latent, -3)
+    if latent.shape[0] == 1 and squeeze_batch_dimensions:
+        latent = latent.squeeze(0)
+    return latent
+
+
 @torch.no_grad()
-def encode_audio_inference(audio_path, trainer, max_batch_size_encode, device='cuda', dont_quantize=False, preprocess_on_gpu=False, fix_batch_size=False):
+def encode_audio_inference(
+    audio_path,
+    trainer,
+    max_batch_size_encode,
+    device='cuda',
+    dont_quantize=False,
+    preprocess_on_gpu=False,
+    fix_batch_size=False,
+    output: str = "latents",
+    n_quantizers: int | None = None,
+):
     trainer.gen = trainer.gen.to(device)
     trainer.gen.eval()
     squeeze_batch_dimensions = False
@@ -211,29 +348,44 @@ def encode_audio_inference(audio_path, trainer, max_batch_size_encode, device='c
         pad = trainer.gen.spec_length-(repr_encoder.shape[-1]%trainer.gen.spec_length)
         repr_encoder = F.pad(repr_encoder, (0,pad))
 
-    if repr_encoder.shape[-1]>trainer.gen.spec_length:
+    if output not in {"token_latents", "token_codes"} and repr_encoder.shape[-1]>trainer.gen.spec_length:
         repr_encoder = torch.split(repr_encoder, trainer.gen.spec_length, dim=-1)
         repr_encoder = torch.cat(repr_encoder, dim=0)
 
     device = next(trainer.gen.parameters()).device
+    if output not in {"latents", "packed", "codes", "token_latents", "token_codes"}:
+        raise ValueError(f"Unsupported encode output={output!r}")
+
+    if output == "token_latents":
+        encode_fn = trainer.gen.encoder_forward
+        encode_kwargs = {"dont_quantize": True}
+    elif output == "token_codes":
+        encode_fn = trainer.gen.encode_codes_from_representation
+        encode_kwargs = {"n_quantizers": n_quantizers}
+    elif output == "packed":
+        encode_fn = trainer.gen.encode_packed_from_representation
+        encode_kwargs = {"quantize": False}
+    elif output == "codes":
+        encode_fn = trainer.gen.encode_codes_from_representation
+        encode_kwargs = {"n_quantizers": n_quantizers}
+    else:
+        encode_fn = trainer.gen.encoder_forward
+        encode_kwargs = {"dont_quantize": dont_quantize}
+
     if fix_batch_size:
         original_batch_size = repr_encoder.shape[0]
         # make sure that batch size is exactly divisible by max_batch_size_encode
         if repr_encoder.shape[0]%max_batch_size_encode!=0:
             rem = torch.zeros(max_batch_size_encode-(repr_encoder.shape[0]%max_batch_size_encode), *repr_encoder.shape[1:], device=repr_encoder.device, dtype=repr_encoder.dtype)
             repr_encoder = torch.cat([repr_encoder, rem], 0)
-        latent = distribute(trainer.gen.encoder_forward_fast, repr_encoder, max_batch_size_encode, device, dont_quantize=dont_quantize, mixed_precision=trainer.gen.mixed_precision)
+        fast_fn = trainer.gen.encoder_forward_fast if output == "latents" else encode_fn
+        latent = distribute(fast_fn, repr_encoder, max_batch_size_encode, device, mixed_precision=trainer.gen.mixed_precision, **encode_kwargs)
         latent = latent[:original_batch_size]
     else:
-        latent = distribute(trainer.gen.encoder_forward, repr_encoder, max_batch_size_encode, device, dont_quantize=dont_quantize, mixed_precision=trainer.gen.mixed_precision)
+        latent = distribute(encode_fn, repr_encoder, max_batch_size_encode, device, mixed_precision=trainer.gen.mixed_precision, **encode_kwargs)
 
     del repr_encoder
-    # split samples
-    latent = torch.split(latent, batch_size, 0)
-    latent = torch.stack(latent, -3)
-    if latent.shape[0]==1 and squeeze_batch_dimensions:
-        latent = latent.squeeze(0)
-    return latent
+    return _restore_chunk_major_output(latent, batch_size, squeeze_batch_dimensions, output)
 
 
 

@@ -44,6 +44,8 @@ def main(cfg: DictConfig):
     ##cfg的额外设置
     extras(cfg)
     OmegaConf.resolve(cfg)  # resolve all string interpolations
+    if cfg.get("seed") is not None:
+        pl.seed_everything(int(cfg.seed), workers=True)
     ##logger
     log.info("Instantiating loggers...")
     logger: List[Logger] = instantiate_loggers(cfg.get("logger"))
@@ -51,23 +53,31 @@ def main(cfg: DictConfig):
     log.info(f"Instantiating data module <{cfg.data._target_}>")
     data = hydra.utils.instantiate(cfg.data)
     data.setup()
+    train_dataloader = data.train_dataloader()
+    val_dataloader = data.val_dataloader()
     # model
     log.info(f"Instantiating model <{cfg.model._target_}>")
     model = hydra.utils.instantiate(cfg.model)
     if "pretrain_ckpt_path" in cfg and cfg["pretrain_ckpt_path"] is not None:
-        model_state_dict = torch.load(
+        ckpt = torch.load(
             cfg["pretrain_ckpt_path"], map_location="cpu", weights_only=False
-        )["state_dict"]
-        # breakpoint()
-        # 尝试加载模型权重，跳过不匹配的参数
-        missing_keys, unexpected_keys = [], []
-        for name, param in model.named_parameters():
-            if name in model_state_dict and param.shape == model_state_dict[name].shape:
-                param.data.copy_(model_state_dict[name])
+        )
+        model_state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+        current_state_dict = model.state_dict()
+        compatible_state_dict = {}
+        skipped_keys = []
+        for name, tensor in model_state_dict.items():
+            if name in current_state_dict and current_state_dict[name].shape == tensor.shape:
+                compatible_state_dict[name] = tensor
             else:
-                missing_keys.append(name)
-        log.info(f"加载预训练模型权重，跳过了 {len(missing_keys)} 个不匹配的参数")
-        # model.load_state_dict(model_state_dict, strict=True)
+                skipped_keys.append(name)
+        missing_keys = [name for name in current_state_dict if name not in compatible_state_dict]
+        current_state_dict.update(compatible_state_dict)
+        model.load_state_dict(current_state_dict, strict=True)
+        log.info(
+            f"加载预训练模型权重: loaded={len(compatible_state_dict)}, "
+            f"missing={len(missing_keys)}, skipped={len(skipped_keys)}"
+        )
     # training wrappr
     log.info(f"Instantiating model <{cfg.wrapper._target_}>")
 
@@ -98,18 +108,21 @@ def main(cfg: DictConfig):
         log.info("Logging hyperparameters!")
         log_hyperparameters(object_dict)
     log.info("Starting training!")
+    fit_kwargs = {
+        "train_dataloaders": train_dataloader,
+    }
+    if val_dataloader is not None:
+        fit_kwargs["val_dataloaders"] = val_dataloader
     if cfg.resume_from_ckpt is not None:
         if os.path.exists(cfg.resume_from_ckpt):
             print("checkpoint存在")
-            trainer.fit(
-                training_wrapper, datamodule=data, ckpt_path=cfg.resume_from_ckpt
-            )
+            trainer.fit(training_wrapper, ckpt_path=cfg.resume_from_ckpt, **fit_kwargs)
         else:
             print("checkpoint不存在")
 
-            trainer.fit(training_wrapper, datamodule=data)
+            trainer.fit(training_wrapper, **fit_kwargs)
     else:
-        trainer.fit(training_wrapper, datamodule=data)
+        trainer.fit(training_wrapper, **fit_kwargs)
 
 
 if __name__ == "__main__":

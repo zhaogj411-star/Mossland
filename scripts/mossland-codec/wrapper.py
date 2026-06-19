@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 from collections.abc import Iterable
 
@@ -100,6 +101,14 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         lr_schedule_total_steps: int = 2_000_000,
         random_mix_prob: float = 0.0,
         fsq_dropout_prob: float = 0.75,
+        rvq_commitment_weight: float = 1.0,
+        rvq_codebook_weight: float = 1.0,
+        rvq_distill_weight: float = 1.0,
+        rvq_latent_train_prob: float = 0.1,
+        rvq_detach_encoder: bool = True,
+        train_n_quantizers: int | None = None,
+        train_n_quantizers_choices: list[int] | None = None,
+        rvq_log_n_quantizers_choices: list[int] | None = None,
         consistency_step: float = 0.1,
         consistency_step_schedule: str = "exponential",
         consistency_step_total_steps: int = 2_000_000,
@@ -110,6 +119,7 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         consistency_loss_delta: float = 0.00054,
         consistency_min_sigma_delta: float = 0.001,
         index_data_every_step: int | None = None,
+        rvq_sync_debug_every_step: int | None = None,
         fail_on_nonfinite: bool = True,
     ):
         super().__init__(
@@ -133,21 +143,68 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         self.lr_schedule = lr_schedule
         self.lr_schedule_total_steps = int(lr_schedule_total_steps)
         self.random_mix_prob = float(random_mix_prob)
-        self.fsq_dropout_prob = fsq_dropout_prob
-        self.consistency_step = consistency_step
+        self.fsq_dropout_prob = float(fsq_dropout_prob)
+        self.rvq_commitment_weight = float(rvq_commitment_weight)
+        self.rvq_codebook_weight = float(rvq_codebook_weight)
+        self.rvq_distill_weight = float(rvq_distill_weight)
+        self.rvq_latent_train_prob = float(rvq_latent_train_prob)
+        self.rvq_detach_encoder = bool(rvq_detach_encoder)
+        self.train_n_quantizers = train_n_quantizers
+        self.train_n_quantizers_choices = train_n_quantizers_choices
+        self.rvq_log_n_quantizers_choices = (
+            [int(value) for value in rvq_log_n_quantizers_choices]
+            if rvq_log_n_quantizers_choices is not None
+            else [16, 32, 64, 128]
+        )
+        self.consistency_step = float(consistency_step)
         self.consistency_step_schedule = consistency_step_schedule
         self.consistency_step_total_steps = int(consistency_step_total_steps)
-        self.consistency_step_end_exp = consistency_step_end_exp
+        self.consistency_step_end_exp = float(consistency_step_end_exp)
         self.sigma_sampling = sigma_sampling
-        self.lognormal_mean = lognormal_mean
-        self.lognormal_std = lognormal_std
-        self.consistency_loss_delta = consistency_loss_delta
-        self.consistency_min_sigma_delta = consistency_min_sigma_delta
+        self.lognormal_mean = float(lognormal_mean)
+        self.lognormal_std = float(lognormal_std)
+        self.consistency_loss_delta = float(consistency_loss_delta)
+        self.consistency_min_sigma_delta = float(consistency_min_sigma_delta)
         self.index_data_every_step = _normalize_positive_int_or_none(
             index_data_every_step,
             "index_data_every_step",
         )
+        self.rvq_sync_debug_every_step = _normalize_positive_int_or_none(
+            rvq_sync_debug_every_step,
+            "rvq_sync_debug_every_step",
+        )
         self._last_index_data_step: int | None = None
+        self._last_rvq_sync_debug_step: int | None = None
+
+    def _set_rvq_distributed_sync(self, model: MosslandCodecTransformer) -> None:
+        if getattr(model, "rvq", None) is None:
+            return
+        enabled = (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+            and torch.distributed.get_world_size() > 1
+        )
+        model.rvq.set_distributed_sync(enabled)
+
+    def on_train_start(self):
+        self._set_rvq_distributed_sync(self.model)
+        if hasattr(self, "ema") and getattr(self.ema, "ema_model", None) is not None:
+            self._set_rvq_distributed_sync(self.ema.ema_model)
+
+    def _sync_ema_rvq_from_raw(self) -> None:
+        if not hasattr(self, "ema"):
+            return
+        ema_model = getattr(self.ema, "ema_model", None)
+        if ema_model is None:
+            return
+        if getattr(self.model, "rvq", None) is None or getattr(ema_model, "rvq", None) is None:
+            return
+        ema_model.rvq.load_state_dict(self.model.rvq.state_dict(), strict=True)
+
+    def on_before_zero_grad(self, *args, **kwargs):
+        if hasattr(self, "ema"):
+            self.ema.update()
+            self._sync_ema_rvq_from_raw()
 
     def configure_optimizers(self):
         optimizer_name = self.optimizer_name.lower()
@@ -258,6 +315,157 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
             return True
         return bool(torch.rand((), device=device) < self.fsq_dropout_prob)
 
+    def _sample_n_quantizers(self) -> int | None:
+        if self.train_n_quantizers_choices:
+            idx = torch.randint(
+                len(self.train_n_quantizers_choices),
+                (),
+                device=self.device,
+            ).item()
+            return int(self.train_n_quantizers_choices[idx])
+        if self.train_n_quantizers is not None:
+            return int(self.train_n_quantizers)
+        return None
+
+    def _log_current_lr(self):
+        try:
+            trainer = self.trainer
+        except RuntimeError:
+            return
+        if trainer is None or not getattr(trainer, "optimizers", None):
+            return
+        lr = trainer.optimizers[0].param_groups[0]["lr"]
+        self.log("optim/lr", lr, prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+
+    def _log_tensor_stats(self, prefix: str, tensor: torch.Tensor):
+        stats = tensor.detach().float()
+        self.log(f"{prefix}_mean", stats.mean(), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+        self.log(f"{prefix}_std", stats.std(), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+
+    @torch.no_grad()
+    def _rvq_rank_checksum(self) -> torch.Tensor:
+        rvq = getattr(self.model, "rvq", None)
+        if rvq is None:
+            return torch.zeros(1, device=self.device)
+        device = self.device
+        values = []
+        layers = getattr(getattr(rvq, "vq", None), "layers", [])
+        layer_indices = [0, 15, 31, 63, 127]
+        for index in layer_indices:
+            if index >= len(layers):
+                continue
+            codebook = layers[index]._codebook
+            for name in ("embed", "cluster_size", "embed_avg"):
+                tensor = getattr(codebook, name, None)
+                if tensor is None:
+                    continue
+                stats = tensor.detach().float()
+                values.extend(
+                    [
+                        stats.mean(),
+                        stats.std(),
+                        stats.norm() / max(1, stats.numel()),
+                    ]
+                )
+        if not values:
+            return torch.zeros(1, device=device)
+        return torch.stack([value.to(device=device) for value in values])
+
+    @torch.no_grad()
+    def _maybe_log_rvq_rank_sync(self, trainer) -> None:
+        if self.rvq_sync_debug_every_step is None or getattr(self.model, "rvq", None) is None:
+            return
+        step = int(getattr(trainer, "global_step", 0))
+        if step <= 0 or step == self._last_rvq_sync_debug_step:
+            return
+        if step % self.rvq_sync_debug_every_step != 0:
+            return
+        self._last_rvq_sync_debug_step = step
+
+        local = self._rvq_rank_checksum()
+        world_size = 1
+        rank = 0
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            rank = torch.distributed.get_rank()
+
+        gathered = [torch.empty_like(local) for _ in range(world_size)]
+        if world_size > 1:
+            torch.distributed.all_gather(gathered, local)
+        else:
+            gathered[0].copy_(local)
+        stacked = torch.stack(gathered)
+        max_abs_diff = (stacked - stacked[:1]).abs().max()
+        checksum_norm = stacked.norm(dim=1)
+
+        self.log(
+            "rvq_sync/max_abs_diff_from_rank0",
+            max_abs_diff,
+            prog_bar=False,
+            on_step=True,
+            on_epoch=False,
+            sync_dist=False,
+        )
+        self.log(
+            "rvq_sync/rank_checksum_norm",
+            checksum_norm[rank],
+            prog_bar=False,
+            on_step=True,
+            on_epoch=False,
+            sync_dist=False,
+        )
+
+        if rank != 0:
+            return
+        try:
+            log_dir = getattr(trainer, "log_dir", None) or getattr(trainer, "default_root_dir", None)
+        except RuntimeError:
+            log_dir = None
+        if not log_dir:
+            return
+        path = os.path.join(log_dir, "rvq_rank_sync_debug.jsonl")
+        record = {
+            "step": step,
+            "world_size": world_size,
+            "max_abs_diff_from_rank0": float(max_abs_diff.detach().cpu()),
+            "checksum_norms": [float(value) for value in checksum_norm.detach().cpu()],
+        }
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    @torch.no_grad()
+    def _log_rvq_rate_errors(self, packed_continuous: torch.Tensor):
+        if self.model.rvq is None or not self.rvq_log_n_quantizers_choices:
+            return
+        was_training = self.model.rvq.training
+        self.model.rvq.eval()
+        try:
+            quantizer_input = packed_continuous.detach()
+            initialized_count = self.model.rvq.initialized_codebook_count()
+            for n_quantizers in self.rvq_log_n_quantizers_choices:
+                if n_quantizers < 1 or n_quantizers > self.model.rvq_num_quantizers:
+                    continue
+                if int(n_quantizers) > initialized_count:
+                    continue
+                packed_quantized, _, _ = self.model.rvq(
+                    quantizer_input,
+                    n_quantizers=int(n_quantizers),
+                )
+                error = torch.nn.functional.mse_loss(
+                    packed_quantized.float(),
+                    packed_continuous.detach().float(),
+                )
+                self.log(
+                    f"rvq/quantization_error_{int(n_quantizers)}",
+                    error.detach(),
+                    prog_bar=False,
+                    on_step=True,
+                    on_epoch=False,
+                    sync_dist=False,
+                )
+        finally:
+            self.model.rvq.train(was_training)
+
     def _maybe_random_mix(
         self,
         src: torch.Tensor,
@@ -349,6 +557,7 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         return loss, metrics, predicted, target
 
     def training_step(self, batch, batch_idx):
+        self._log_current_lr()
         payload, info = batch
         task = MosslandTaskBatch.from_payload(payload)
 
@@ -367,14 +576,34 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         self._assert_finite("src_representation", src_representation, info)
         self._assert_finite("target_representation", target_representation, info)
 
-        dont_quantize = self._fsq_dropout_active(src_representation.device)
-        latents = self.model.encoder_forward(src_representation, dont_quantize=dont_quantize)
+        rvq_encoded = None
+        rvq_loss = src_representation.new_zeros(())
+        n_quantizers = None
+        latent_source = "continuous"
+        if self.model.bottleneck_type in {"packed_rvq", "causal_rvq"}:
+            n_quantizers = None
+            rvq_encoded = self.model.encode_bottleneck(
+                src_representation,
+                quantize=True,
+                detach_encoder=True,
+                n_quantizers=n_quantizers,
+            )
+            latents = rvq_encoded.continuous
+            latent_source = "continuous"
+        else:
+            dont_quantize = self._fsq_dropout_active(src_representation.device)
+            encoded = self.model.encode_bottleneck(
+                src_representation,
+                quantize=not dont_quantize,
+            )
+            latents = encoded.latents
+            latent_source = "continuous" if dont_quantize else "fsq"
         self._assert_finite("latents", latents, info)
         features = self.model.pre_decoder_forward(latents)
         for idx, feature in enumerate(features):
             self._assert_finite(f"features[{idx}]", feature, info)
 
-        loss, metrics, predicted, target = self._consistency_loss(
+        consistency_loss, metrics, predicted, target = self._consistency_loss(
             target_representation,
             latents,
             features,
@@ -382,9 +611,19 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         )
         self._assert_finite("predicted", predicted, info)
         self._assert_finite("target", target, info)
+        loss = consistency_loss
+        if rvq_encoded is not None:
+            rvq_loss = (
+                self.rvq_commitment_weight * rvq_encoded.commitment_loss
+                + self.rvq_codebook_weight * rvq_encoded.codebook_loss
+                + self.rvq_distill_weight * rvq_encoded.distill_loss
+            )
+            if self.rvq_commitment_weight or self.rvq_codebook_weight or self.rvq_distill_weight:
+                loss = loss + rvq_loss
         self._assert_finite("loss", loss, info)
 
-        self.log("loss", loss, prog_bar=True, on_step=True, on_epoch=False, sync_dist=False)
+        self.log("loss/total", loss, prog_bar=True, on_step=True, on_epoch=False, sync_dist=False)
+        self.log("loss/rvq", rvq_loss.detach(), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
         self.log(
             "augment/random_mix",
             mix_applied,
@@ -407,21 +646,37 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
                 sync_dist=False,
             )
         self.log(
-            "latent/fsq_dropout",
-            torch.tensor(float(dont_quantize), device=loss.device),
+            "latent/source_discrete",
+            torch.tensor(float(latent_source == "discrete"), device=loss.device),
             prog_bar=False,
             on_step=True,
             on_epoch=False,
             sync_dist=False,
         )
-        self.log(
-            "latent/std",
-            latents.detach().float().std(),
-            prog_bar=False,
-            on_step=True,
-            on_epoch=False,
-            sync_dist=False,
-        )
+        self._log_tensor_stats("latent/selected", latents)
+        if self.model.bottleneck_type in {"packed_rvq", "causal_rvq"} and rvq_encoded is not None:
+            if n_quantizers is not None:
+                self.log("rvq/n_quantizers", float(n_quantizers), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+            self._log_tensor_stats("latent/continuous", rvq_encoded.continuous)
+            self._log_tensor_stats("latent/discrete", rvq_encoded.latents)
+            if rvq_encoded.packed_continuous is not None:
+                self._log_tensor_stats("rvq/packed_continuous", rvq_encoded.packed_continuous)
+            if rvq_encoded.packed_quantized is not None:
+                self._log_tensor_stats("rvq/packed_quantized", rvq_encoded.packed_quantized)
+            self._log_tensor_stats("rvq/projected_latents", rvq_encoded.projected_latents)
+            self.log("rvq/quantization_error", rvq_encoded.commitment_loss.detach(), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+            self._log_rvq_rate_errors(rvq_encoded.packed_continuous)
+            self.log("rvq/codebook_loss", rvq_encoded.codebook_loss.detach(), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+            self.log("rvq/distill_loss", rvq_encoded.distill_loss.detach(), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+        else:
+            self.log(
+                "latent/fsq_dropout",
+                torch.tensor(float(latent_source == "continuous"), device=loss.device),
+                prog_bar=False,
+                on_step=True,
+                on_epoch=False,
+                sync_dist=False,
+            )
         for name, value in metrics.items():
             self.log(name, value, prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
         return loss
@@ -439,6 +694,7 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         return _rebuild_dataset_indexes(getattr(trainer, "datamodule", None))
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
+        self._maybe_log_rvq_rank_sync(self.trainer)
         rebuilt = self._maybe_rebuild_data_index(self.trainer)
         if rebuilt:
             self.log(
@@ -460,6 +716,9 @@ class MosslandCodecTrainingCallback(pl.Callback):
         sample_rate: int = 48000,
         use_ema: bool = True,
         silence_seconds: float = 0.25,
+        demo_n_quantizers: int | None = None,
+        demo_n_quantizers_choices: list[int] | tuple[int, ...] | None = None,
+        demo_all_ranks: bool = True,
     ):
         super().__init__()
         self.demo_dir = demo_dir
@@ -468,6 +727,9 @@ class MosslandCodecTrainingCallback(pl.Callback):
         self.sample_rate = sample_rate
         self.use_ema = use_ema
         self.silence_seconds = silence_seconds
+        self.demo_n_quantizers = demo_n_quantizers
+        self.demo_n_quantizers_choices = demo_n_quantizers_choices
+        self.demo_all_ranks = bool(demo_all_ranks)
         self.last_demo_step = -1
 
     def _concat_demo_audio(self, *segments: torch.Tensor) -> torch.Tensor:
@@ -488,22 +750,64 @@ class MosslandCodecTrainingCallback(pl.Callback):
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    def _set_eval(self, model):
+        was_training = model.training
+        model.eval()
+        return was_training
+
+    def _restore_training(self, model, was_training: bool):
+        model.train(was_training)
+
+    def _demo_quantizer_rates(self, model) -> list[int | None]:
+        if getattr(model, "bottleneck_type", None) not in {"packed_rvq", "causal_rvq"}:
+            return [None]
+        if self.demo_n_quantizers is not None:
+            return [int(self.demo_n_quantizers)]
+        if self.demo_n_quantizers_choices is not None:
+            rates = [int(value) for value in self.demo_n_quantizers_choices]
+        else:
+            max_quantizers = getattr(model, "rvq_num_quantizers", None)
+            if max_quantizers is not None and int(max_quantizers) <= 32:
+                rates = [8, 16, 32]
+            else:
+                rates = [16, 32, 64, 128]
+        max_quantizers = getattr(model, "rvq_num_quantizers", None)
+        if max_quantizers is not None:
+            rates = [value for value in rates if 1 <= value <= int(max_quantizers)]
+        rvq = getattr(model, "rvq", None)
+        if rvq is not None and not model.training:
+            initialized_count = rvq.initialized_codebook_count()
+            rates = [value for value in rates if value <= initialized_count]
+        return rates
+
     @torch.no_grad()
     def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):
         if self.demo_dir is None:
             return
-        if trainer.global_step % self.demo_every != 1 or self.last_demo_step == trainer.global_step:
+        step = int(trainer.global_step)
+        should_run_demo = step == 1 or (
+            self.demo_every > 0 and step > 0 and step % self.demo_every == 0
+        )
+        if not should_run_demo or self.last_demo_step == step:
             return
-        self.last_demo_step = trainer.global_step
+        self.last_demo_step = step
+        global_rank = int(getattr(trainer, "global_rank", 0))
+        if global_rank == 0:
+            print(f"[demo_callback] saving demo at step={step}", flush=True)
+        if not self.demo_all_ranks and global_rank != 0:
+            return
 
         payload = task = src = target = src_audio = generated = comparison = None
-        generated_versions = quantized_generated = continuous_generated = None
+        generated_versions = quantized_versions = continuous_generated = None
         src_item = target_item = generated_item = None
+        model_states = []
         try:
             self._clear_cuda_cache()
-            model = module.model
+            demo_models = [("raw", module.model)]
             if self.use_ema and hasattr(module, "ema"):
-                model = module.ema.ema_model
+                demo_models.append(("ema", module.ema.ema_model))
+            for _, demo_model in demo_models:
+                model_states.append((demo_model, self._set_eval(demo_model)))
 
             os.makedirs(self.demo_dir, exist_ok=True)
             payload, _ = batch
@@ -512,38 +816,54 @@ class MosslandCodecTrainingCallback(pl.Callback):
             target = task.target[: self.demo_num]
             demo_count = src.shape[0]
             demo_task_id = _slice_label(task.task_id, demo_count)
-            src_audio, quantized_generated = model.generate_waveform(
-                src,
-                task_id=demo_task_id,
-                dont_quantize=False,
-            )
-            _, continuous_generated = model.generate_waveform(
-                src,
-                task_id=demo_task_id,
-                dont_quantize=True,
-            )
-            generated_versions = (
-                ("quantized", quantized_generated),
-                ("continuous", continuous_generated),
-            )
-            target = model.prepare_audio_batch(target).detach().cpu()
-            for mode, generated in generated_versions:
-                for idx, (src_item, target_item, generated_item) in enumerate(
-                    zip(src_audio, target, generated)
-                ):
+            target = module.model.prepare_audio_batch(target).detach().cpu()
+
+            for model_label, demo_model in demo_models:
+                quantized_versions = []
+                src_audio = None
+                for n_quantizers in self._demo_quantizer_rates(demo_model):
+                    src_audio, quantized_generated = demo_model.generate_waveform(
+                        src,
+                        task_id=demo_task_id,
+                        dont_quantize=False,
+                        n_quantizers=n_quantizers,
+                    )
+                    label = (
+                        "quantized"
+                        if n_quantizers is None
+                        else f"quantized{int(n_quantizers)}"
+                    )
+                    quantized_versions.append((label, quantized_generated))
+                _, continuous_generated = demo_model.generate_waveform(
+                    src,
+                    task_id=demo_task_id,
+                    dont_quantize=True,
+                )
+                generated_versions = tuple(quantized_versions) + (
+                    ("continuous", continuous_generated),
+                )
+                for idx, (src_item, target_item) in enumerate(zip(src_audio, target)):
                     task_id = _label_at(demo_task_id, idx)
                     base = f"{trainer.global_step}_{idx}_{task_id}_rank{trainer.global_rank}"
-                    comparison = self._concat_demo_audio(src_item, target_item, generated_item)
+                    ordered_segments = [src_item, target_item]
+                    ordered_labels = []
+                    for mode, generated in generated_versions:
+                        ordered_segments.append(generated[idx])
+                        ordered_labels.append(mode)
+                    comparison = self._concat_demo_audio(*ordered_segments)
                     torchaudio.save(
                         os.path.join(
                             self.demo_dir,
-                            f"{base}_{mode}_src_target_generated.wav",
+                            f"{base}_{model_label}_{'_'.join(ordered_labels)}_src_target_generated.mp3",
                         ),
                         comparison.float(),
                         self.sample_rate,
+                        format="mp3",
                     )
         finally:
+            for demo_model, was_training in model_states:
+                self._restore_training(demo_model, was_training)
             payload = task = src = target = src_audio = generated = comparison = None
-            generated_versions = quantized_generated = continuous_generated = None
+            generated_versions = quantized_versions = continuous_generated = None
             src_item = target_item = generated_item = None
             self._clear_cuda_cache()

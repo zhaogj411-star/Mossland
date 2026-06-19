@@ -11,7 +11,7 @@
 - 模型类是 `scripts.mossland-codec.models.MosslandCodecTransformer`。decoder conditioning 只使用 sigma embedding 加上任务名 `task_embedding`；模型也负责 `prepare_audio_batch()` 和 `generate_waveform()` 这类与模型输入长度、声道和推理路径强相关的逻辑。
 - codec 与 no-latent A2A 模型的 `task_embedding` 默认使用 `normal_(0, 0.02)` 初始化，不使用全 0 初始化；A2A 配置显式设置 `model.task_embedding_init_std: 0.02`。
 - wrapper 类是 `scripts.mossland-codec.wrapper.MosslandCodecTrainingWrapper`，负责消费已经构造好的任务 payload、计算 consistency loss、维护 EMA、optimizer/scheduler 和 demo 输出；不再抽样任务或构造 `src/target`。
-- demo callback 在生成 demo 前后都会执行 `gc.collect()`、`torch.cuda.synchronize()` 和 `torch.cuda.empty_cache()`，避免 demo 推理与训练 step 的缓存显存重叠导致 OOM；每个样本会分别保存 `quantized` 与 `continuous` 两份 `src/target/generated` 对比音频，分别对应 `dont_quantize=False` 和 `dont_quantize=True`。
+- demo callback 在生成 demo 前后都会执行 `gc.collect()`、`torch.cuda.synchronize()` 和 `torch.cuda.empty_cache()`，避免 demo 推理与训练 step 的缓存显存重叠导致 OOM；每个样本只保存顺序拼接 mp3，raw model 和 EMA model 各一份。当前 `causal_rvq` 配置内容为 `src -> target -> quantized8 -> quantized16 -> quantized32 -> continuous`；旧 `packed_rvq` checkpoint 仍可用旧的 16/32/64/128 码率。
 - 不集成完整 `scripts.music2latent`；只保留当前 wrapper 需要的 finite check、grad norm、EMA 更新、导出和 pseudo-Huber loss。
 
 ## 任务
@@ -113,11 +113,11 @@ launcher 会增强 native 崩溃场景的稳健性：worker 在处理每个 pend
 - `vocals`
 - `accompaniment`
 
-首次构造时会用 `fast_scandir` 扫描 prepared 目录的 `audio/` 子树，找到 `mixture.mp3` 且同目录包含 `vocals.mp3/accompaniment.mp3` 的条目，并写入 `${dirs[0]}/index.list`。之后如果 `index.list` 存在，训练启动直接读取它，不再依赖 `prepare_separation.py` 的 progress 日志。每个样本会使用同一个 sample offset 裁切已解码的 stem，并返回 `audio=mixture`，所以 `reconstruct`、`super_resolution`、`mono_to_stereo` 仍可直接使用 mixture。
+如果索引存在，训练启动直接读取 `${dirs[0]}/index.list` 或显式 `index_file`，不扫描 prepared 目录，也不依赖 `prepare_separation.py` 的 progress 日志。只有首次缺索引时才会用 `fast_scandir` 扫描 prepared 目录的 `audio/` 子树，找到 `mixture.mp3` 且同目录包含 `vocals.mp3/accompaniment.mp3` 的条目并写入 index。首次多 rank/worker 同时启动且缺索引时用 `${index_file}.lock` 保护扫描，只有一个进程建索引，其余进程等待索引文件出现后读取；锁等待默认 `3600` 秒，可用 `index_wait_timeout_seconds` 调整。每个样本会使用同一个 sample offset 裁切已解码的 stem，并返回 `audio=mixture`，所以 `reconstruct`、`super_resolution`、`mono_to_stereo` 仍可直接使用 mixture。
 
 `PreparedSeparationDataset.length` 可把 dataset 暴露给 DataLoader 的逻辑长度固定住；为 `None` 时使用真实 `len(item_dirs)`。取样时仍会对当前真实 `item_dirs` 数量取余，因此固定 `length` 不会复制样本，只是提供稳定 epoch 长度。当前主配置设为 `1000000`，适合分离预处理边生成、训练边读取的场景。
 
-`MosslandCodecTrainingWrapper.index_data_every_step` 可在训练过程中周期性重新索引 prepared 目录；为 `None` 时不重新索引。wrapper 在 `on_train_batch_end()` 按 `trainer.global_step` 判断是否触发，触发时从 `trainer.datamodule` 找到带 `rebuild_index()` 的底层 dataset 并调用它。`PreparedSeparationDataset.rebuild_index()` 会重新扫描 prepared 目录、重写 `index.list`，并直接替换当前 dataset 实例的 `self.item_dirs`。
+`MosslandCodecTrainingWrapper.index_data_every_step` 可在训练过程中周期性重新索引 prepared 目录；为 `None` 时不重新索引，当前主配置保持 `null`，保证有 index 时只读 index、不做运行时 refresh。wrapper 在 `on_train_batch_end()` 按 `trainer.global_step` 判断是否触发，触发时从 `trainer.datamodule` 找到带 `rebuild_index()` 的底层 dataset 并调用它。`PreparedSeparationDataset.rebuild_index()` 会重新扫描 prepared 目录、重写 `index.list`，并直接替换当前 dataset 实例的 `self.item_dirs`。
 
 `MosslandTaskDataset` 会先抽样任务，再调用 dataset 的任务感知读取接口，避免非分离任务白白解码 stem。单 crop 路径使用 `get_item_for_task(index, task_id)`：非分离任务只读 `mixture.mp3`；`separate_vocals` 只读 `mixture.mp3` 和 `vocals.mp3`；`separate_accompaniment` 只读 `mixture.mp3` 和 `accompaniment.mp3`。
 
@@ -137,7 +137,11 @@ python scripts/train.py experiment=mossland-codec
 
 `scripts/configs/experiment/mossland-codec.yaml` 的 `model:` 节是模型超参数的主入口，包含 `sample_rate`、`hop`、`fac`、`spec_length`、`sigma_min`、`sigma_max`、`num_latents`、frontend 层数等原先容易散落在 hparams 文件中的参数。训练 wrapper 只从传入的 `model` 实例读取需要保持一致的音频和噪声调度参数。
 
-当前训练配置把模型容量调到约 494M 参数：`dim=768`、`head_dim=128`、`num_layers=22`、`num_layers_encoder=22`、`cond_channels=768`、`frontend_multipliers_list=[1,2,4,12]`。压缩行为保持不变：`hop=1024`、`fac=2`、`spec_length=32`、`num_latents=128`、`fsq_levels=[11,11,11,11]` 和 `frontend_freq_downsample_list=[0,1,0]` 不变；实测实例化后 `data_length=512`、`freq_dim=64`、`time_dim=8`、`downsample_ratio=64`。
+当前主训练配置使用 causal RVQ tokenizer 口径：48 kHz stereo、`sample_size=96000`、`hop=768`、`fac=2`、`spec_length=62`，因此 `prepare_audio_batch()` 的 2 秒窗口正好是 `96000` samples。frontend 下采样列表为 `[1,1,1]`，只沿频率下采样，实测 `data_length=744`、`freq_dim=12`、`time_dim=62`、`downsample_ratio=64`。bottleneck 为 `bottleneck_type=causal_rvq`、`bottleneck_channels=32`、`num_latents=25`：encoder 按时长连续输出有序 continuous token，2 秒为 `[B,50,32]`，4 秒为 `[B,100,32]`，即 `32-d @ 25 Hz`。
+
+`causal_rvq` 的 encoder 不再使用 CoDiCodec 原始 learned summary query 产生 chunk 内无时序关系的 128 个 summary embedding；它把 frontend `[freq,time]` token 聚合为时间序列，经过参考 `scripts/MOSS_Audio_Tokenizer` local-causal SDPA 思路实现的 `LocalCausalSelfAttention/CausalLatentEncoder`，再输出有序 latent token。编码侧不再把长音频按 `spec_length` 切成互不相见的 chunk；注意力窗口仍是有限的，由 `causal_rvq_context` 决定。当前配置 `causal_rvq_context=620` 作用在 frontend pooling 后约 62Hz 的时间步上，约等于 10 秒历史；`LocalCausalSelfAttention` 对长序列按 query chunk 分块构造局部 causal mask，避免全长 attention mask 占用随音频平方增长。离散分支为 lucidrains EMA RVQ：`rvq_num_quantizers=32`、`rvq_codebook_size=1024`、`rvq_codebook_dim=null`，codes 形如 `[B,Q,T]`，2 秒窗口全量为 `[B,32,50]`，适合 delay pattern LLM。主 consistency 训练仍只用 continuous latent；RVQ loss 权重默认全 0，RVQ 只作为 detached EMA codebook assignment/update 旁路。
+
+旧 `bottleneck_type=packed_rvq` 分支仍保留用于历史 checkpoint 兼容。该旧分支仍创建 FSQ 并调用 `dont_quantize()` 作为 bounded continuous 归一化层，但不使用 FSQ indexes 作为离散瓶颈；新 `causal_rvq` 不使用 FSQ bound 或 FSQ indexes。
 
 `scripts/mossland-codec/transformer_layers.py` 的 attention 通过 PyTorch `scaled_dot_product_attention` 执行。CUDA bf16/fp16 且无显式 mask 时会用 `torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION)` 强制 flash backend；CPU、不支持 flash 或显式 tensor mask 时回退普通 SDPA。decoder 原先的 `[2*block, 2*block]` float block mask 会让 SDPA 退回非 flash，现在改为 `block_causal_attention_mask(block_size)` 轻量 spec，`MultiHeadAttention` 把它拆成两次无 mask attention：左半只 attend 左半，右半 attend 全部，语义等价但可走 flash。
 
@@ -167,6 +171,10 @@ audio = codec.decode(latents, task_id="reconstruct")
 ```
 
 `decode()`、`decode_next()` 和底层分块 decode 默认 `task_id="reconstruct"`，也可传 `separate_vocals`、`separate_accompaniment`、`super_resolution` 或 `mono_to_stereo`。如果未显式传入 `max_batch_size_encode`、`max_batch_size_decode` 或 `sigma_rescale`，推理代码会读取模型实例上的同名属性。
+
+`bottleneck_type="causal_rvq"` 时，`EncoderDecoder.encode(..., discrete=False)` 返回 `[32,T]` 或 `[B,32,T]` continuous latent，`EncoderDecoder.encode(..., discrete=True, n_quantizers=N)` 返回 `[N,T]` 或 `[B,N,T]` int64 RVQ codes；2 秒音频的 `T=50`，4 秒音频的 `T=100`。`decode(codes, ...)` 会通过 `latent_from_codes()` 还原 `[B,T,32]` latent，再按每 25 token 分组送入原 consistency decoder；这里的分组是 decoder 形状约束，不表示 encode 侧有独立 chunk。`scripts/mossland-codec/infer_demo.py` 会对 32 层 RVQ 默认保存 `rvq8/rvq16/rvq32`。
+
+`bottleneck_type="packed_rvq"` 的旧推理口径仍保留：`encode(..., discrete=True, n_quantizers=N)` 返回 `[N,chunks]` 或 `[B,N,chunks]` codes，`decode(codes, ...)` 还原 packed 512-d latent 再 unpack 成 `[B,chunks,128,4]`。RVQ 少层重建仍使用逐层 codebook 累加，避免 lucidrains `get_codes_from_indices()` 为少层推理 stack 全层 codebook 造成额外显存占用。
 
 ## 推理相关参数
 

@@ -35,6 +35,27 @@ codegraph impact MosslandCodecTransformer
 
 注意：`codegraph init .` 已在本仓库创建 `.codegraph/`，该目录被 `.gitignore` 忽略。CodeGraph 1.0 会把 `.gitignore` 隐藏的嵌入式 git repo 也纳入索引，当前 `tmp/` 下 baseline/metric refs 可能出现在结果和 `.codegraph/errors.log` 中；判断 Mossland 主项目逻辑时优先看 `scripts/`、`tests/`、`agent-code/` 和 `docs/` 路径。
 
+## Claude Code
+
+本机已全局安装 Claude Code，路径为 `/usr/local/bin/claude`。2026-06-19 验证版本为 `2.1.183 (Claude Code)`。
+
+当前环境默认注入 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` 及小写同名变量；安装或升级 Claude Code 时如需绕过代理，使用：
+
+```sh
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+  npm install -g @anthropic-ai/claude-code@latest --proxy=false --https-proxy=false
+```
+
+验证：
+
+```sh
+which claude
+claude --version
+npm list -g @anthropic-ai/claude-code --depth=0
+```
+
+AI Gateway 接入配置在 `~/.claude/settings.json`，使用 `ANTHROPIC_BASE_URL=https://aigw.sotatts.online` 和 `ANTHROPIC_AUTH_TOKEN`，不要把完整 token 写入仓库。2026-06-19 排查结论：本机配置已生效，`/v1/models` 会列出 `claude-opus-4-7`、`claude-opus-4-8` 等 Claude 模型，但同一 token 直接请求 `/v1/messages` 会返回 `no available upstream channel for model ...`，所以 Claude Code 报 “selected model may not exist or you may not have access”。`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.5` 和 `codex-auto-review` 在网关的 Anthropic messages 入口可直连，但 Claude Code 发送的 system role 会被这些后端拒绝，不能作为 Claude Code 的直接替代。需要网关侧为 `claude-*` 模型启用 upstream，或修复非 Claude 模型的 Anthropic 兼容转换。
+
 ## 检查范围
 
 ```sh

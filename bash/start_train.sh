@@ -1,1 +1,1 @@
-cd /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland && /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/py_env/bin/python  -m scripts.train experiment=mossland-codec trainer.devices=8
+cd /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland && /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/py_env/bin/python  -m scripts.train experiment=music2latent-ema-rvq-overfit10 trainer.devices=8
