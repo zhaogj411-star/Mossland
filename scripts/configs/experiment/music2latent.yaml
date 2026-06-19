@@ -1,0 +1,118 @@
+# @package _global_
+
+project_name: music2latent-official
+checkpoint_monitor: loss/total
+tags: ["music2latent", "official-repro"]
+seed: 42
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 100
+
+trainer:
+  devices: [0, 1, 2, 3, 4, 5, 6, 7]
+  strategy: ddp
+  precision: bf16-mixed
+  max_steps: 800000
+  max_epochs: 10000000
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+  log_every_n_steps: 1
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: null
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.music2latent.data.Music2LatentOfficialPTDataset
+    root: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/music2latent_official_pt_10k
+    index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/music2latent_official_pt_10k/files.list
+    key: audio
+    length: 160000
+  pin_memory: true
+  val_split: null
+  train_batch_size: 64
+  val_batch_size: 1
+  num_workers: 16
+  prefetch_factor: 2
+
+model:
+  _target_: scripts.music2latent.models.Music2Latent
+  sample_rate: 44100
+  base_channels: 64
+  data_channels: 2
+  hop: 512
+  mixed_precision: true
+  bottleneck_channels: 64
+  bottleneck_base_channels: 512
+  num_bottleneck_layers: 4
+  quantizer_num_quantizers: 0
+  heads: 4
+  cond_channels: 256
+  use_fourier: false
+  fourier_scale: 0.2
+  normalization: true
+  dropout_rate: 0.0
+  min_res_dropout: 16
+  init_as_zero: true
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  sigma_data: 0.5
+  layers_list: [2, 2, 2, 2, 2]
+  multipliers_list: [1, 2, 4, 4, 4]
+  attention_list: [0, 0, 1, 1, 1]
+  freq_downsample_list: [1, 0, 0, 0]
+  layers_list_encoder: [1, 1, 1, 1, 1]
+  attention_list_encoder: [0, 0, 1, 1, 1]
+  frequency_scaling: true
+  pre_normalize_2d_to_1d: true
+  pre_normalize_downsampling_encoder: true
+  audio_processor:
+    _target_: scripts.music2latent.audio.AudioProcessor
+    alpha_rescale: 0.65
+    beta_rescale: 0.34
+    hop_size: 512
+    fac: 4
+    center_pad: false
+
+wrapper:
+  _target_: scripts.music2latent.wrapper.Music2LatnetTrainingWrapper
+  use_ema: true
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  optimizer_name: radam
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 10
+  lr_schedule_total_steps: 800000
+  final_learning_rate: 1e-6
+  rvq_commitment_weight: 0.0
+  rvq_codebook_weight: 0.0
+  rvq_hidden_recon_weight: 0.0
+  rvq_latent_train_prob: 0.0
+  rvq_detach_encoder: true
+  train_n_quantizers: null
+  train_n_quantizers_choices: null
+  consistency_step: 0.1
+  consistency_step_schedule: exponential
+  consistency_step_total_steps: 800000
+  consistency_step_end_exp: 3.0
+  sigma_sampling: lognormal
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_loss_delta: 0.00054
+  consistency_min_sigma_delta: 0.001
+  fail_on_nonfinite: true
+  fail_on_nonfinite_grad: false
+
+callbacks:
+  demo_callback:
+    _target_: scripts.music2latent.wrapper.Music2LatnetTrainingCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 4
+    demo_every: 100
+    sample_rate: 44100
+    demo_n_quantizers: null
+    demo_n_quantizers_choices: null
+    denoising_steps: 1
+    demo_seed: 1234
