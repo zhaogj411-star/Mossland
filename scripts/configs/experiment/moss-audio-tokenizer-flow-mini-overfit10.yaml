@@ -1,0 +1,143 @@
+# @package _global_
+
+project_name: moss-audio-tokenizer-flow-mini-overfit10
+checkpoint_monitor: loss
+tags: ["audioCodec", "moss-audio-tokenizer-flow", "mini", "overfit10"]
+seed: 1234
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 500
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.data.datasets.SampleDataset
+    dirs: ["/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER"]
+    sample_size: 480000 # 125 tokens / 10 seconds at 12.5 Hz; must be a multiple of 3840 samples
+    sample_rate: 48000
+    random_crop: false
+    num_channels: 2
+    crops_per_file: 1
+    index_file: tmp/moss-audio-tokenizer-flow/overfit10.index.list
+    audio_cache_dir: null
+  pin_memory: true
+  val_split: null
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 2
+  prefetch_factor: 2
+
+trainer:
+  devices: [0, 1, 2, 3, 4, 5, 6, 7]
+  strategy: ddp
+  num_sanity_val_steps: 0
+  max_steps: 7500
+  log_every_n_steps: 50
+  enable_progress_bar: false
+  check_val_every_n_epoch: null
+  val_check_interval: null
+
+model:
+  _target_: scripts.MOSS_Audio_Tokenizer_Flow.models.MossAudioTokenizerFlow
+  sample_rate: 48000
+  number_channels: 2
+  token_rate: 12.5
+  hop: 1920
+  fac: 2
+  spec_frames_per_token: 2
+  alpha_rescale: 0.65
+  beta_rescale: 0.34
+  hidden_dim: 192
+  continuous_dim: 64
+  quantizer_dim: 128
+  condition_dim: 192
+  encoder_layers: 3
+  encoder_heads: 4
+  decoder_dim: 256
+  decoder_layers: 5
+  decoder_heads: 4
+  context_duration: 10.0
+  num_quantizers: 32
+  codebook_size: 1024
+  commitment_weight: 0.25
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  rho: 7.0
+  default_denoising_steps: 2
+  dropout: 0.0
+  patch_refine_channels: 16
+  patch_refine_layers: 2
+  patch_refine_residual_scale: 0.25
+  patch_refine_residual_clip: 0.0
+  patch_input_channels: 0
+  patch_input_layers: 0
+  spectral_frontend_channels: 12
+  spectral_frontend_freq_downsamples: 3
+
+wrapper:
+  _target_: scripts.MOSS_Audio_Tokenizer_Flow.wrapper.MossAudioTokenizerFlowTrainingWrapper
+  use_ema: false
+  ema_beta: 0.999
+  learning_rate: 3e-4
+  weight_decay: 0.0
+  optimizer_name: adamw
+  patch_refiner_lr_scale: 0.25
+  spectral_frontend_lr_scale: 0.5
+  quantizer_lr_scale: 0.5
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 5
+  lr_schedule_total_steps: 7500
+  continuous_loss_weight: 1.0
+  discrete_loss_weight: 0.5
+  quantizer_loss_weight: 0.05
+  consistency_pair_loss_weight: 1.0
+  denoising_anchor_loss_weight: 1.0
+  prior_loss_weight: 0.2
+  quiet_token_loss_weight: 0.2
+  quiet_token_quantile: 0.2
+  waveform_spectral_loss_weight: 0.05
+  waveform_spectral_n_fft: 2048
+  waveform_spectral_hop_length: 512
+  denoising_anchor_sampling: uniform
+  sigma_max_anchor_loss_weight: 0.5
+  detach_discrete_condition: false
+  sigma_sampling: uniform
+  sigma_batch_mode: token_halves
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_step: 0.1
+  consistency_step_total_steps: 10000
+  consistency_step_schedule: exponential
+  consistency_step_end_exp: 3.0
+  consistency_min_sigma_delta: 1e-5
+  consistency_loss_delta: 0.00054
+  index_data_every_step: null
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.MOSS_Audio_Tokenizer_Flow.wrapper.MossAudioTokenizerFlowCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 1
+    demo_every: 500
+    sample_rate: 48000
+    use_ema: false
+    silence_seconds: 0.25
+    denoising_steps: 2
+    sampling_mode: deterministic
+  fixed_eval_callback:
+    _target_: scripts.MOSS_Audio_Tokenizer_Flow.wrapper.MossAudioTokenizerFlowFixedEvalCallback
+    eval_dir: ${paths.output_dir}/fixed_eval
+    dirs: ${data.dataset.dirs}
+    index_file: ${data.dataset.index_file}
+    eval_every: 0
+    max_items: 10
+    sample_size: ${data.dataset.sample_size}
+    sample_rate: ${data.dataset.sample_rate}
+    num_channels: ${data.dataset.num_channels}
+    use_ema: false
+    denoising_steps: 2
+    sampling_mode: deterministic
+    audio_cache_dir: null
+    fail_on_error: false

@@ -207,6 +207,8 @@ class PTDataset(Dataset):
             else:
                 start = random.randint(0, max_start)
             data = data[:, start : start + self.target_length]
+        elif data_length == self.target_length:
+            start = 0
         elif data_length < self.target_length:
             # data = torch.cat(
             #     [data, torch.zeros(data.shape[0], self.target_length - data_length)],
@@ -248,6 +250,9 @@ class PTDataset(Dataset):
                     main_key_info = main_key_info[:, : self.target_length]
                     start = 0
                     end = self.target_length
+                elif main_key_info.shape[1] == self.target_length:
+                    start = 0
+                    end = self.target_length
                 else:
                     raise ValueError(
                         f"data length {main_key_info.shape[1]} is less than target length {self.target_length}"
@@ -278,14 +283,20 @@ class SampleDataset(torch.utils.data.Dataset):
         crops_per_file=1,
         index_file=None,
         index_wait_timeout_seconds=3600,
+        max_duration_seconds: float | int | None = None,
+        length=1000000,
     ):
         super().__init__()
         self.dirs = dirs
         self.filenames = []
+        self.length = int(length)
         self.no_channel_dim = no_channel_dim
         self.crops_per_file = max(1, int(crops_per_file))
         self.index_file = index_file
         self.index_wait_timeout_seconds = int(index_wait_timeout_seconds)
+        self.max_duration_seconds = _normalize_max_duration_seconds(max_duration_seconds)
+        self._duration_limit_cache: dict[str, bool] = {}
+        self._duration_seconds_cache: dict[str, float | None] = {}
         if audio_cache_dir is not None:
             os.makedirs(audio_cache_dir, exist_ok=True)
             self.audio_cache_dir = audio_cache_dir
@@ -350,6 +361,8 @@ class SampleDataset(torch.utils.data.Dataset):
         return filenames
 
     def refresh_filenames(self):
+        self._duration_limit_cache.clear()
+        self._duration_seconds_cache.clear()
         if self.index_file is not None and os.path.exists(self.index_file):
             self.filenames = self._read_index_file(self.index_file)
             print(f"refresh:Loaded {len(self.filenames)} files from {self.index_file}")
@@ -388,6 +401,17 @@ class SampleDataset(torch.utils.data.Dataset):
                 pass
         # self.filenames = self.filenames[:2]
         print(f"refresh:Found {len(self.filenames)} files")
+
+    def _file_exceeds_duration_limit(self, filename):
+        if self.max_duration_seconds is None:
+            return False
+        if filename in self._duration_limit_cache:
+            return self._duration_limit_cache[filename]
+        duration = _probe_audio_duration_seconds_ffprobe(Path(filename))
+        self._duration_seconds_cache[filename] = duration
+        exceeds = duration is not None and duration >= self.max_duration_seconds
+        self._duration_limit_cache[filename] = exceeds
+        return exceeds
 
     def load_file(self, filename):
         ext = filename.split(".")[-1]
@@ -442,14 +466,30 @@ class SampleDataset(torch.utils.data.Dataset):
         }
 
     def __len__(self):
-        return 1000000
+        return self.length
 
     def __getitem__(self, idx):
 
+        audio_filename = None
         try:
+            if not self.filenames:
+                raise RuntimeError("SampleDataset has no remaining audio files")
             idx = idx % len(self.filenames)
             audio_filename = self.filenames[idx]
             start_time = time.time()
+            if self._file_exceeds_duration_limit(audio_filename):
+                duration = self._duration_seconds_cache.get(audio_filename)
+                message = (
+                    f"Skipping long audio {audio_filename}: "
+                    f"duration_seconds={duration}, "
+                    f"max_duration_seconds={self.max_duration_seconds}"
+                )
+                # print(message, flush=True)
+                logger.info(message)
+                self.filenames.remove(audio_filename)
+                if not self.filenames:
+                    raise RuntimeError("All audio files exceed max_duration_seconds")
+                return self[random.randrange(len(self))]
             audio = self.load_file(audio_filename)
 
             crops = []
@@ -494,7 +534,10 @@ class SampleDataset(torch.utils.data.Dataset):
             return (audio, info)
         except Exception as e:
             print(f"Couldn't load file {audio_filename}: {e}")
-            self.filenames.remove(audio_filename)
+            if audio_filename in self.filenames:
+                self.filenames.remove(audio_filename)
+            if not self.filenames:
+                raise
             return self[random.randrange(len(self))]
 
 
@@ -834,6 +877,7 @@ class PreparedSeparationDataset(Dataset):
         scan_fallback: bool = True,
         crops_per_file: int = 1,
         max_duration_seconds: float | int | None = None,
+        index_wait_timeout_seconds: int = 3600,
         length: int | None = None,
     ):
         super().__init__()
@@ -864,6 +908,7 @@ class PreparedSeparationDataset(Dataset):
         self.scan_fallback = bool(scan_fallback)
         self.crops_per_file = max(1, int(crops_per_file))
         self.max_duration_seconds = _normalize_max_duration_seconds(max_duration_seconds)
+        self.index_wait_timeout_seconds = int(index_wait_timeout_seconds)
         self.length = _normalize_positive_int_or_none(length, "length")
         self._duration_limit_cache: dict[Path, bool] = {}
         self.item_dirs: list[Path] = []
@@ -871,23 +916,34 @@ class PreparedSeparationDataset(Dataset):
 
     def refresh_items(self, rebuild_index: bool = False):
         item_dirs = []
+        loaded_existing_indexes = 0
+        built_indexes = 0
         for root, index_path in self.index_sources:
             if rebuild_index:
-                scanned = self._scan_item_dirs(root)
-                self._write_index(root, index_path, scanned)
+                scanned = self._scan_and_write_index(root, index_path)
                 item_dirs.extend(scanned)
+                built_indexes += 1
                 continue
             if index_path.exists():
                 item_dirs.extend(self._read_index(root, index_path))
+                loaded_existing_indexes += 1
                 continue
             if self.scan_fallback:
-                scanned = self._scan_item_dirs(root)
-                self._write_index(root, index_path, scanned)
+                scanned = self._load_or_build_index(root, index_path)
                 item_dirs.extend(scanned)
+                built_indexes += 1
         self.item_dirs = sorted(set(item_dirs))
         if rebuild_index:
             self._duration_limit_cache.clear()
-        print(f"refresh:Found {len(self.item_dirs)} prepared separation items")
+        if rebuild_index:
+            source = "Rebuilt"
+        elif built_indexes:
+            source = "Built"
+        elif loaded_existing_indexes:
+            source = "Loaded"
+        else:
+            source = "Found"
+        print(f"{source} {len(self.item_dirs)} prepared separation items from index")
 
     def rebuild_index(self):
         self.refresh_items(rebuild_index=True)
@@ -919,6 +975,49 @@ class PreparedSeparationDataset(Dataset):
         )
         tmp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
         os.replace(tmp_path, index_path)
+
+    def _wait_for_index(self, root: Path, index_path: Path, lock_path: Path) -> list[Path] | None:
+        start_time = time.time()
+        while True:
+            if index_path.exists():
+                return self._read_index(root, index_path)
+            if time.time() - start_time > self.index_wait_timeout_seconds:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                return None
+            time.sleep(5)
+
+    def _scan_and_write_index(self, root: Path, index_path: Path) -> list[Path]:
+        scanned = self._scan_item_dirs(root)
+        self._write_index(root, index_path, scanned)
+        return scanned
+
+    def _load_or_build_index(self, root: Path, index_path: Path) -> list[Path]:
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = index_path.with_name(f"{index_path.name}.lock")
+        while True:
+            if index_path.exists():
+                return self._read_index(root, index_path)
+            try:
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                item_dirs = self._wait_for_index(root, index_path, lock_path)
+                if item_dirs is not None:
+                    return item_dirs
+
+        try:
+            with os.fdopen(lock_fd, "w", encoding="utf-8") as f:
+                f.write(f"pid={os.getpid()}\n")
+                f.write(f"created_at={time.time()}\n")
+            return self._scan_and_write_index(root, index_path)
+        finally:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
 
     def _item_exceeds_duration_limit(self, item_dir: Path) -> bool:
         if self.max_duration_seconds is None:

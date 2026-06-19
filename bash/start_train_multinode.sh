@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-EXPERIMENT="${EXPERIMENT:-mossland-codec}"
+EXPERIMENT="${EXPERIMENT:-mossland-codec-rvq1024}"
 
 : "${PET_NPROC_PER_NODE:?PET_NPROC_PER_NODE is required}"
 : "${PET_NNODES:?PET_NNODES is required}"

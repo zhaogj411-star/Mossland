@@ -38,6 +38,7 @@ def main(cfg: DictConfig):
     # 创建文件夹保存配置和权重文件
     output_dir = cfg.output_path
     os.makedirs(output_dir, exist_ok=True)
+    load_strict = bool(cfg.get("load_strict", True))
 
     # 保存配置文件
     config_file_path = os.path.join(output_dir, "config.yaml")
@@ -53,7 +54,16 @@ def main(cfg: DictConfig):
             experiment_ckpt_path,
             map_location=training_wrapper.device,
         )
-        training_wrapper.load_state_dict(checkpoint["state_dict"], strict=True)
+        incompatible = training_wrapper.load_state_dict(
+            checkpoint["state_dict"],
+            strict=load_strict,
+        )
+        if not load_strict:
+            log.info(
+                "Loaded checkpoint with strict=False: "
+                f"missing_keys={len(incompatible.missing_keys)}, "
+                f"unexpected_keys={len(incompatible.unexpected_keys)}"
+            )
         training_wrapper.export_model(ckpt_output_path, export_ema=cfg.export_ema)
     else:
         ckpt_output_path = os.path.join(output_dir, "checkpoint.ckpt")
@@ -63,7 +73,16 @@ def main(cfg: DictConfig):
             experiment_ckpt_path,
             map_location=training_wrapper.device,
         )
-        training_wrapper.load_state_dict(checkpoint["module"], strict=False)
+        incompatible = training_wrapper.load_state_dict(
+            checkpoint["module"],
+            strict=load_strict,
+        )
+        if not load_strict:
+            log.info(
+                "Loaded checkpoint with strict=False: "
+                f"missing_keys={len(incompatible.missing_keys)}, "
+                f"unexpected_keys={len(incompatible.unexpected_keys)}"
+            )
         training_wrapper.export_model(ckpt_output_path, export_ema=cfg.export_ema)
 
 

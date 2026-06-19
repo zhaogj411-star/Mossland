@@ -1,0 +1,32 @@
+# @package _global_
+
+defaults:
+  - same-flow-baseline-m2l-parity-debugfaithful
+  - _self_
+
+project_name: same-flow-baseline-m2l-parity-debugfaithful-rvq
+tags: ["same-flow", "consistency", "frame-direct", "m2l-parity", "debugfaithful", "rvq"]
+
+model:
+  quantizer_num_quantizers: 8
+  quantizer_codebook_size: 1024
+  quantizer_codebook_dim: 8
+  quantizer_dropout: 0.0
+  quantizer_decay: 0.8
+  quantizer_kmeans_init: true
+  quantizer_kmeans_iters: 10
+  quantizer_threshold_ema_dead_code: 2
+
+wrapper:
+  rvq_commitment_weight: 0.1
+  rvq_codebook_weight: 0.0
+  rvq_hidden_recon_weight: 1.0
+  rvq_latent_train_prob: 0.0
+  rvq_detach_encoder: true
+  train_n_quantizers: null
+  train_n_quantizers_choices: [4, 8]
+
+callbacks:
+  demo_callback:
+    demo_n_quantizers: null
+    demo_n_quantizers_choices: [4, 8]
