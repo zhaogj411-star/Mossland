@@ -1,0 +1,83 @@
+# @package _global_
+
+project_name: moss-audio-flowcodec-overfit10
+checkpoint_monitor: loss
+tags: ["audioCodec", "moss-audio-flowcodec", "local-transformer", "overfit10", "no-adv"]
+seed: 1234
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 500
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.data.datasets.SampleDataset
+    dirs: ["/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER"]
+    sample_size: 96000 # 2 seconds at 48 kHz; 50 tokens at 25 Hz
+    sample_rate: 48000
+    random_crop: false
+    num_channels: 2
+    crops_per_file: 1
+    index_file: tmp/music2latent/overfit10.sample.index.list
+    audio_cache_dir: null
+  pin_memory: true
+  val_split: null
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 2
+  prefetch_factor: 2
+
+trainer:
+  log_every_n_steps: 10
+  strategy: ddp
+
+model:
+  _target_: scripts.moss_audio_flowcodec.models.MossAudioFlowCodec
+  sample_rate: 48000
+  audio_channels: 2
+  encoder_dim: 32
+  encoder_rates: [5, 4, 4, 4, 3, 2]
+  latent_dim: 384
+  decoder_dim: 384
+  decoder_rates: [2, 3, 4, 4, 4, 5]
+  num_quantizers: 32
+  codebook_size: 1024
+  codebook_dim: 8
+  quantizer_dropout: 0.0
+  continuous_dim: 32
+  local_transformer_layers: 4
+  local_transformer_heads: 6
+  local_transformer_context: 25
+  local_transformer_causal: true
+  local_transformer_ff_mult: 4
+  local_transformer_positional_embedding: rope
+  local_transformer_attention: sdpa
+
+wrapper:
+  _target_: scripts.moss_audio_flowcodec.wrapper.MossAudioFlowCodecTrainingWrapper
+  learning_rate: 2e-4
+  weight_decay: 0.0
+  optimizer_name: adamw
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 100
+  lr_schedule_total_steps: 10000
+  waveform_loss_weight: 1.0
+  stft_loss_weight: 1.0
+  discrete_loss_weight: 1.0
+  continuous_loss_weight: 1.0
+  commitment_loss_weight: 0.25
+  codebook_loss_weight: 1.0
+  train_n_quantizers: null
+  train_n_quantizers_choices: null
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.moss_audio_flowcodec.wrapper.MossAudioFlowCodecCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 2
+    demo_every: 100
+    sample_rate: 48000
+    silence_seconds: 0.25
+    save_separate_files: false
+    save_tokens: false

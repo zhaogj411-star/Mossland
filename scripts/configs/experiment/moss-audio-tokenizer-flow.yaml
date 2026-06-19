@@ -1,0 +1,113 @@
+# @package _global_
+
+project_name: moss-audio-tokenizer-flow
+checkpoint_monitor: loss
+tags: ["audioCodec", "moss-audio-tokenizer-flow", "continuous-discrete"]
+seed: null
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 5000
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.data.datasets.SampleDataset
+    dirs: ["/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER"]
+    sample_size: 480000 # 125 tokens / 10 seconds at 12.5 Hz; must be a multiple of 3840 samples at 48 kHz
+    sample_rate: 48000
+    random_crop: true
+    num_channels: 2
+    crops_per_file: 4
+    index_file: tmp/moss-audio-tokenizer-flow/netease_spider_audio.index.list
+    audio_cache_dir: null
+  pin_memory: true
+  val_split: 0.0001
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 4
+  prefetch_factor: 2
+
+trainer:
+  log_every_n_steps: 10
+
+model:
+  _target_: scripts.MOSS_Audio_Tokenizer_Flow.models.MossAudioTokenizerFlow
+  sample_rate: 48000
+  number_channels: 2
+  token_rate: 12.5
+  hop: 1920
+  fac: 2
+  spec_frames_per_token: 2
+  alpha_rescale: 0.65
+  beta_rescale: 0.34
+  hidden_dim: 1024
+  continuous_dim: 128
+  quantizer_dim: 1024
+  condition_dim: 512
+  encoder_layers: 12
+  encoder_heads: 16
+  decoder_dim: 512
+  decoder_layers: 12
+  decoder_heads: 8
+  context_duration: 10.0
+  num_quantizers: 32
+  codebook_size: 1024
+  commitment_weight: 0.25
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  rho: 7.0
+  default_denoising_steps: 2
+  dropout: 0.0
+  patch_refine_channels: 32
+  patch_refine_layers: 2
+  patch_refine_residual_scale: 0.25
+  patch_refine_residual_clip: 0.0
+  patch_input_channels: 0
+  patch_input_layers: 0
+  spectral_frontend_channels: 24
+  spectral_frontend_freq_downsamples: 3
+
+wrapper:
+  _target_: scripts.MOSS_Audio_Tokenizer_Flow.wrapper.MossAudioTokenizerFlowTrainingWrapper
+  use_ema: true
+  ema_beta: 0.9999
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  optimizer_name: radam
+  patch_refiner_lr_scale: 0.25
+  spectral_frontend_lr_scale: 0.5
+  quantizer_lr_scale: 0.5
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 10000
+  lr_schedule_total_steps: 1000000
+  continuous_loss_weight: 1.0
+  discrete_loss_weight: 0.25
+  quantizer_loss_weight: 1.0
+  consistency_pair_loss_weight: 1.0
+  denoising_anchor_loss_weight: 1.0
+  denoising_anchor_sampling: same
+  sigma_max_anchor_loss_weight: 0.5
+  detach_discrete_condition: false
+  sigma_sampling: lognormal
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_step: 0.1
+  consistency_step_total_steps: 200000
+  consistency_step_schedule: exponential
+  consistency_step_end_exp: 4.0
+  consistency_min_sigma_delta: 1e-5
+  consistency_loss_delta: 0.00054
+  index_data_every_step: null
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.MOSS_Audio_Tokenizer_Flow.wrapper.MossAudioTokenizerFlowCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 2
+    demo_every: 5000
+    sample_rate: 48000
+    use_ema: true
+    silence_seconds: 0.25
+    denoising_steps: 2

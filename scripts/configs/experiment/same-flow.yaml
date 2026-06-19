@@ -1,0 +1,116 @@
+# @package _global_
+
+project_name: same-flow
+checkpoint_monitor: loss/total
+tags: ["same-flow", "consistency", "frame-direct", "full-data", "debugfaithful"]
+seed: 1234
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 2000
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.data.datasets.SampleDataset
+    dirs: ["/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER"]
+    sample_size: 1764000
+    sample_rate: 44100
+    random_crop: true
+    num_channels: 2
+    crops_per_file: 1
+    index_file: tmp/same/netease_spider_audio.index.list
+    audio_cache_dir: null
+    no_channel_dim: false
+    max_duration_seconds: 300
+    length: 10000000
+  pin_memory: true
+  val_split: null
+  train_batch_size: 5
+  val_batch_size: 1
+  num_workers: 4
+  prefetch_factor: 2
+
+trainer:
+  strategy: ddp
+  max_steps: 500000
+  log_every_n_steps: 10
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: null
+  val_check_interval: null
+  devices: [7]
+
+model:
+  _target_: scripts.same_flow.models.SameFlowConsistencyAutoencoder
+  sample_rate: 44100
+  base_channels: 128
+  data_channels: 4
+  hop: 512
+  mixed_precision: true
+  frame_channels: 1024
+  freq_patch_size: 32
+  patch_channels: 32
+  use_latent_film: true
+  bottleneck_channels: 32
+  bottleneck_base_channels: 1024
+  num_bottleneck_layers: 2
+  cond_channels: 512
+  normalization: true
+  dropout_rate: 0.0
+  init_as_zero: true
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  sigma_data: 0.5
+  layers_list: [1, 1, 1, 1, 1]
+  multipliers_list: [1, 2, 4, 4, 4]
+  freq_downsample_list: [1, 0, 0, 0]
+  layers_list_encoder: [1, 1, 1, 1, 1]
+  same_flow_block:
+    transformer_depth: 3
+    dim_heads: 64
+    sliding_window: [8, 8]
+    differential: true
+    dyt: true
+    ff_mult: 2
+    init_as_zero: true
+  audio_processor:
+    _target_: scripts.same_flow.audio.AudioProcessor
+    alpha_rescale: 0.65
+    beta_rescale: 0.34
+    hop_size: 512
+    fac: 4
+    center_pad: false
+
+wrapper:
+  _target_: scripts.same_flow.wrapper.SameFlowTrainingWrapper
+  use_ema: true
+  learning_rate: 3e-4
+  weight_decay: 0.0
+  optimizer_name: radam
+  lr_schedule: music2latent_cosine
+  lr_warmup_steps: 100
+  lr_schedule_total_steps: 500000
+  final_learning_rate: 1e-5
+  consistency_step: 0.1
+  consistency_step_schedule: constant
+  consistency_step_total_steps: 500000
+  consistency_step_end_exp: 3.0
+  sigma_sampling: lognormal
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_loss_delta: 0.00054
+  consistency_min_sigma_delta: 0.001
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.same_flow.wrapper.SameFlowTrainingCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 1
+    demo_every: 2000
+    sample_rate: 44100
+    demo_n_quantizers: null
+    demo_n_quantizers_choices: null
+    denoising_steps: 1
+    sampling_mode: deterministic
+    demo_seed: 1234

@@ -1,0 +1,143 @@
+# @package _global_
+
+project_name: same-flow-debug-m2l-parity
+checkpoint_monitor: loss/total
+tags: ["audioCompressor", "same-flow", "music2latent", "parity", "debug"]
+seed: 1234
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 500
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.same_flow_debug.data.CachedAudioSegmentDataset
+    index_file: tmp/same_flow/m2l_fast_baseline_cache_48000_mono_34304/index.jsonl
+    sample_size: 34304
+    num_channels: 1
+    no_channel_dim: false
+    length: 10000
+  pin_memory: true
+  val_split: null
+  train_batch_size: 2
+  val_batch_size: 1
+  num_workers: 2
+  prefetch_factor: 2
+
+trainer:
+  strategy: ddp
+  max_steps: 10000
+  log_every_n_steps: 10
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: null
+  val_check_interval: null
+
+model:
+  _target_: scripts.same_flow_debug.models.Music2LatentSameFlow
+  sample_rate: 44100
+  base_channels: 32
+  data_channels: 2
+  hop: 512
+  mixed_precision: true
+  frame_channels: 512
+  freq_patch_size: 32
+  patch_channels: 32
+  use_latent_prior: false
+  use_latent_film: true
+  use_patch_denoiser: true
+  direct_patch_output: true
+  raw_patch_tokens: false
+  raw_frame_tokens: false
+  direct_frame_output: false
+  bottleneck_channels: 64
+  bottleneck_base_channels: 256
+  num_bottleneck_layers: 2
+  quantizer_num_quantizers: 0
+  quantizer_codebook_size: 256
+  quantizer_codebook_dim: null
+  quantizer_dropout: 0.0
+  quantizer_decay: 0.8
+  quantizer_kmeans_init: true
+  quantizer_kmeans_iters: 10
+  quantizer_threshold_ema_dead_code: 2
+  heads: 4
+  cond_channels: 128
+  use_fourier: false
+  fourier_scale: 0.2
+  normalization: true
+  dropout_rate: 0.0
+  min_res_dropout: 16
+  init_as_zero: true
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  sigma_data: 0.5
+  layers_list: [1, 1, 1, 1, 1]
+  multipliers_list: [1, 2, 4, 4, 4]
+  attention_list: [0, 0, 0, 0, 0]
+  freq_downsample_list: [1, 0, 0, 0]
+  layers_list_encoder: [1, 1, 1, 1, 1]
+  attention_list_encoder: [0, 0, 0, 0, 0]
+  same_flow_block:
+    transformer_depth: 1
+    dim_heads: 32
+    sliding_window: [8, 8]
+    differential: true
+    dyt: true
+    ff_mult: 2
+    init_as_zero: true
+  audio_processor:
+    _target_: scripts.same_flow_debug.audio.AudioProcessor
+    alpha_rescale: 0.65
+    beta_rescale: 0.34
+    hop_size: 512
+    fac: 4
+    center_pad: false
+
+wrapper:
+  _target_: scripts.same_flow_debug.wrapper.SameFlowTrainingWrapper
+  use_ema: true
+  learning_rate: 3e-4
+  weight_decay: 0.0
+  optimizer_name: radam
+  lr_schedule: music2latent_cosine
+  lr_warmup_steps: 100
+  lr_schedule_total_steps: 3000
+  final_learning_rate: 1e-5
+  rvq_commitment_weight: 0.0
+  rvq_codebook_weight: 0.0
+  rvq_hidden_recon_weight: 0.0
+  rvq_latent_train_prob: 0.0
+  rvq_detach_encoder: true
+  train_n_quantizers: null
+  train_n_quantizers_choices: null
+  consistency_step: 0.1
+  consistency_step_schedule: exponential
+  consistency_step_total_steps: 3000
+  consistency_step_end_exp: 3.0
+  sigma_sampling: lognormal
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_loss_delta: 0.00054
+  consistency_min_sigma_delta: 0.001
+  training_objective: consistency
+  max_denoise_sigma: null
+  clean_loss_type: pseudo_huber
+  denoising_anchor_weight: 0.0
+  high_freq_anchor_weight: 0.0
+  high_freq_anchor_start_bin: 700
+  latent_prior_loss_weight: 0.0
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.same_flow_debug.wrapper.SameFlowTrainingCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 1
+    demo_every: 200
+    sample_rate: 44100
+    demo_n_quantizers: null
+    demo_n_quantizers_choices: null
+    denoising_steps: 4
+    sampling_mode: deterministic
+    demo_seed: 1234

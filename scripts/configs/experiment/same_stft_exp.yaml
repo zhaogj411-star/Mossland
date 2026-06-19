@@ -1,0 +1,151 @@
+# @package _global_
+
+project_name: same-stft
+checkpoint_monitor: train/loss
+tags: ["audioCodec", "same", "continuous", "transformer-autoencoder", "stft-pretransform"]
+seed: null
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 2000
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.data.datasets.SampleDataset
+    dirs: ["/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER"]
+    sample_size: 589824 # SAME-L official config sample_size; 44.1 kHz ~4.46s
+    sample_rate: 44100
+    random_crop: true
+    num_channels: 2
+    crops_per_file: 1
+    # index_file: tmp/same/netease_spider_audio.index.list
+    index_file: tmp/same/overfit10_audio.index.list
+    audio_cache_dir: null
+    no_channel_dim: false
+    max_duration_seconds: 300
+    length: 100000
+  pin_memory: true
+  val_split: 0.0001
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 4
+  prefetch_factor: 2
+
+trainer:
+  devices: [0]
+  log_every_n_steps: 10
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+
+model:
+  _target_: scripts.same.models.SAMEAutoencoder
+  autoencoder:
+    _target_: scripts.same.autoencoders.AudioAutoencoder
+    encoder:
+      _target_: scripts.same.autoencoders.SAMEEncoder
+      in_channels: 2048
+      channels: 256
+      c_mults: [6]
+      strides: [16]
+      latent_dim: 256
+      transformer_depths: [12]
+      checkpointing: true
+      differential: true
+      dyt: true
+      dim_heads: 64
+      sliding_window: [1, 1]
+      variable_stride: true
+      mask_noise: 0.001
+    decoder:
+      _target_: scripts.same.autoencoders.SAMEDecoder
+      out_channels: 2048
+      channels: 256
+      c_mults: [6]
+      strides: [16]
+      latent_dim: 256
+      transformer_depths: [12]
+      sinusoidal_blocks: [8]
+      checkpointing: false
+      differential: true
+      dyt: true
+      dim_heads: 64
+      sliding_window: [1, 1]
+      variable_stride: true
+      mask_noise: 0.1
+    latent_dim: 256
+    downsampling_ratio: 4096
+    sample_rate: 44100
+    io_channels: 2
+    bottleneck:
+      _target_: scripts.same.bottleneck.SoftNormBottleneck
+      dim: 256
+      noise_augment_dim: 0
+      noise_regularize: true
+      auto_scale: true
+      freeze: true
+    pretransform:
+      _target_: scripts.same.pretransforms.Music2LatentSTFTPretransform
+      channels: 2
+      patch_size: 256
+      hop_size: 256
+      fac: 4
+      alpha_rescale: 0.65
+      beta_rescale: 0.2
+      clamp_output: true
+      max_normalized_magnitude: 100.0
+    soft_clip: false
+  sample_rate: 44100
+  audio_channels: 2
+  freeze_encoder: false
+  freeze_decoder: false
+  freeze_bottleneck: false
+
+wrapper:
+  _target_: scripts.same.wrapper.SAMETrainingWrapper
+  learning_rate: 1e-4
+  discriminator_learning_rate: 1e-4
+  weight_decay: 0.0
+  optimizer_name: adamw
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 10
+  lr_schedule_total_steps: 500000
+  warmup_steps: 0
+  warmup_mode: full
+  decoder_finetune: false
+  clip_grad_norm: 1.0
+  use_ema: true
+  ema_beta: 0.9999
+  ema_update_after_step: 2000
+  loss_config:
+    spectral:
+      config:
+        fft_sizes: [2048, 1024, 512, 256, 128, 64, 32]
+        hop_sizes: [512, 256, 128, 64, 32, 16, 8]
+        win_lengths: [2048, 1024, 512, 256, 128, 64, 32]
+        sample_rate: 44100
+        perceptual_weighting: true
+        w_sc: 1.0
+        w_log_mag: 1.0
+        w_lin_mag: 0.0
+      weights:
+        mrstft: 1.0
+    time:
+      weights:
+        l1: 0.0
+    bottleneck:
+      weights:
+        softnorm: 1e-5
+    discriminator:
+      type: none
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.same.wrapper.SAMECallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 1
+    demo_every: 500
+    sample_rate: 44100
+    silence_seconds: 0.25
+    save_separate_files: false
+    save_latents: false
