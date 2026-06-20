@@ -25,13 +25,13 @@ data:
   _target_: scripts.data.datasets.Experiment_Dataset
   dataset:
     _target_: scripts.music2latent.data.Music2LatentOfficialPTDataset
-    root: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/music2latent_official_pt_10k
-    index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/music2latent_official_pt_10k/files.list
+    root: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/music2latent_local_2s_pt
+    index_file: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/music2latent_local_2s_pt/files.list
     key: audio
     length: 160000
   pin_memory: true
   val_split: null
-  train_batch_size: 64
+  train_batch_size: 16
   val_batch_size: 1
   num_workers: 16
   prefetch_factor: 2

@@ -1,8 +1,8 @@
 # @package _global_
 
-project_name: music2latent-localattention
+project_name: music2latent-rvq
 checkpoint_monitor: loss/total
-tags: ["music2latent", "localattention", "same-temporal"]
+tags: ["music2latent", "official-repro", "ema-rvq"]
 seed: 42
 resume_from_ckpt: null
 pretrain_ckpt_path: null
@@ -37,7 +37,7 @@ data:
   prefetch_factor: 2
 
 model:
-  _target_: scripts.music2latent.models.Music2Latent_sametemporal
+  _target_: scripts.music2latent.models.Music2Latent
   sample_rate: 44100
   base_channels: 64
   data_channels: 2
@@ -46,7 +46,14 @@ model:
   bottleneck_channels: 64
   bottleneck_base_channels: 512
   num_bottleneck_layers: 4
-  quantizer_num_quantizers: 0
+  quantizer_num_quantizers: 32
+  quantizer_codebook_size: 1024
+  quantizer_codebook_dim: null
+  quantizer_dropout: 1.0
+  quantizer_decay: 0.8
+  quantizer_kmeans_init: true
+  quantizer_kmeans_iters: 10
+  quantizer_threshold_ema_dead_code: 2
   heads: 4
   cond_channels: 256
   use_fourier: false
@@ -68,12 +75,6 @@ model:
   frequency_scaling: true
   pre_normalize_2d_to_1d: true
   pre_normalize_downsampling_encoder: true
-  same_transformer_depth: 1
-  same_dim_heads: 64
-  same_sliding_window: [1, 1]
-  same_ff_mult: 1
-  same_differential: false
-  same_dyt: false
   audio_processor:
     _target_: scripts.music2latent.audio.AudioProcessor
     alpha_rescale: 0.65
@@ -95,10 +96,10 @@ wrapper:
   rvq_commitment_weight: 0.0
   rvq_codebook_weight: 0.0
   rvq_hidden_recon_weight: 0.0
-  rvq_latent_train_prob: 0.0
-  rvq_detach_encoder: true
+  rvq_latent_train_prob: 0.25
+  rvq_detach_encoder: false
   train_n_quantizers: null
-  train_n_quantizers_choices: null
+  train_n_quantizers_choices: [8, 16, 32]
   consistency_step: 0.1
   consistency_step_schedule: exponential
   consistency_step_total_steps: 800000
@@ -119,6 +120,6 @@ callbacks:
     demo_every: 100
     sample_rate: 44100
     demo_n_quantizers: null
-    demo_n_quantizers_choices: null
+    demo_n_quantizers_choices: [8, 16, 32]
     denoising_steps: 1
     demo_seed: 1234

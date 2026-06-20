@@ -95,3 +95,24 @@ HYDRA_FULL_ERROR=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false \
 ```
 
 注意：`data.num_workers=0` 会触发 PyTorch `prefetch_factor` 限制，因为当前 `Experiment_Dataset.train_dataloader()` 总是传 `prefetch_factor`；调试短跑至少使用 `data.num_workers=1`。
+
+## Mossland codec H200 启动
+
+训练平台的启动命令必须指向脚本或 Python 命令，不能填 `logs/.../runs/<timestamp>` 输出目录。若把 run 目录填成命令，会得到 `<run_dir>: Is a directory`，这是 shell 启动层错误，不是训练代码报错。
+
+单节点 H200 默认入口：
+
+```sh
+cd /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland
+bash/start_train.sh
+```
+
+等价展开：
+
+```sh
+PYTHONPATH=$PWD WANDB_MODE=offline HYDRA_FULL_ERROR=1 \
+/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/py_env/bin/python \
+  -m scripts.train experiment=mossland-codec trainer.devices=8
+```
+
+恢复训练时 `ckpt_path` 或 `resume_from_ckpt` 必须指向 checkpoint 文件或 Lightning checkpoint 目录，不是 run 输出目录。`logs/mossland-codec/runs/2026-06-17_14-07-56` 只跑到几百 step，未到 `checkpoint_every_n_train_steps=5000`，因此没有可恢复的 `checkpoints/`。

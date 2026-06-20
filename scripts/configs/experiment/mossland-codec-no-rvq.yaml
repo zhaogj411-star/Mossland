@@ -1,10 +1,10 @@
 # @package _global_
 
-project_name: mossland-codec
+project_name: mossland-codec-no-rvq
 checkpoint_monitor: loss/total
-tags: ["audioCodec", "mossland-codec", "mossland-rvq", "0p5b", "stereo", "multi-task"]
+tags: ["audioCodec", "mossland-codec", "no-rvq", "0p5b", "stereo", "multi-task"]
 seed: 42
-resume_from_ckpt: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-19_17-50-58/checkpoints/last.ckpt
+resume_from_ckpt: null
 pretrain_ckpt_path: null
 checkpoint_every_n_train_steps: 2000
 
@@ -69,10 +69,10 @@ model:
   bottleneck_channels: 64
   bottleneck_base_channels: 1536
   num_bottleneck_layers: 4
-  quantizer_num_quantizers: 32
+  quantizer_num_quantizers: 0
   quantizer_codebook_size: 1024
   quantizer_codebook_dim: null
-  quantizer_dropout: 1.0
+  quantizer_dropout: 0.0
   quantizer_decay: 0.8
   quantizer_kmeans_init: true
   quantizer_kmeans_iters: 10
@@ -127,10 +127,10 @@ wrapper:
   rvq_commitment_weight: 0.0
   rvq_codebook_weight: 0.0
   rvq_hidden_recon_weight: 0.0
-  rvq_latent_train_prob: 0.25
-  rvq_detach_encoder: false
+  rvq_latent_train_prob: 0.0
+  rvq_detach_encoder: true
   train_n_quantizers: null
-  train_n_quantizers_choices: [8, 16, 32]
+  train_n_quantizers_choices: null
   consistency_step: 0.1
   consistency_step_schedule: exponential
   consistency_step_total_steps: 800000
@@ -151,7 +151,7 @@ callbacks:
     demo_num: 2
     demo_every: 1000
     sample_rate: 44100
-    demo_n_quantizers_choices: [8, 16, 32]
+    demo_n_quantizers_choices: []
     denoising_steps: 1
     demo_seed: 1234
     silence_seconds: 0.25

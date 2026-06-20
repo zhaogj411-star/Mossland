@@ -4,7 +4,7 @@ set -euo pipefail
 RCLONE="/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/low-resource-dialects-quality-sources/tools/rclone-v1.71.0-linux-amd64/rclone"
 RCLONE_CONFIG="/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/low-resource-dialects-quality-sources/tools/rclone-v1.71.0-linux-amd64/rclone.conf"
 SRC="/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-12_12-46-36/checkpoints/last.ckpt"
-DST="qz_oss2:embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-12_12-46-36/checkpoints/last.ckpt"
+DST="qz_oss2:embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-12_12-46-36/checkpoints"
 
 "${RCLONE}" copy "${SRC}" "${DST}" \
   --config "${RCLONE_CONFIG}" \

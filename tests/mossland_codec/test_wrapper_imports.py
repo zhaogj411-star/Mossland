@@ -282,7 +282,7 @@ def test_demo_callback_saves_quantized_and_continuous_demos(monkeypatch, tmp_pat
     monkeypatch.setattr(
         module.torchaudio,
         "save",
-        lambda path, audio, sample_rate: saved_paths.append(Path(path).name),
+        lambda path, audio, sample_rate, **kwargs: saved_paths.append(Path(path).name),
     )
 
     class FakeModel:
@@ -306,8 +306,7 @@ def test_demo_callback_saves_quantized_and_continuous_demos(monkeypatch, tmp_pat
 
     assert generate_calls == [False, True]
     assert saved_paths == [
-        "1_0_reconstruct_rank0_quantized_src_target_generated.wav",
-        "1_0_reconstruct_rank0_continuous_src_target_generated.wav",
+        "1_0_reconstruct_rank0_raw_quantized_continuous_src_target_generated.mp3",
     ]
 
 
@@ -340,10 +339,10 @@ def test_mossland_experiment_config_points_to_self_contained_codec():
 
     assert cfg.model._target_ == "scripts.mossland-codec.models.MosslandCodecTransformer"
     assert cfg.wrapper._target_ == "scripts.mossland-codec.wrapper.MosslandCodecTrainingWrapper"
-    assert cfg.model.sample_rate == 44100
-    assert cfg.model.hop == 1024
+    assert cfg.model.sample_rate == 48000
+    assert cfg.model.hop == 768
     assert cfg.model.fac == 2
-    assert cfg.model.spec_length == 32
+    assert cfg.model.spec_length == 62
     assert cfg.model.sigma_min == 0.002
     assert cfg.model.sigma_max == 80.0
     assert cfg.model.dim == 768
@@ -354,12 +353,12 @@ def test_mossland_experiment_config_points_to_self_contained_codec():
     assert list(cfg.model.frontend_multipliers_list) == [1, 2, 4, 12]
     assert "source_root" not in cfg.data.dataset.dataset
     assert cfg.data.dataset.dataset.max_duration_seconds == 300
-    assert cfg.data.dataset.dataset.crops_per_file == 16
+    assert cfg.data.dataset.dataset.crops_per_file == 8
     assert cfg.data.dataset.dataset.length == 10000000
     assert "index_data_every_step" not in cfg.data.dataset.dataset
-    assert cfg.wrapper.index_data_every_step == 20000
+    assert cfg.wrapper.index_data_every_step is None
     assert cfg.data.train_batch_size == 1
-    assert cfg.data.train_batch_size * cfg.data.dataset.dataset.crops_per_file == 16
+    assert cfg.data.train_batch_size * cfg.data.dataset.dataset.crops_per_file == 8
     assert cfg.data.num_workers == 6
     assert cfg.data.prefetch_factor == 2
     assert cfg.trainer.log_every_n_steps == 10

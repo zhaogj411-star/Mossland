@@ -33,7 +33,7 @@ audio
 
 `T_token` 必须和时间位置有固定映射。目标 token rate 是 `25 Hz`；在 `sample_rate=48000` 时，每个 token 对应 `1920` waveform samples，约 `40 ms`。
 
-Local Transformer 建议使用双向局部窗口作为第一版，以质量优先；如果未来需要 streaming，再增加 causal/local causal 选项。关键约束是每个 token 只能看附近固定窗口，而不是 attend 整个长序列或整个 chunk。
+Local Transformer 建议使用双向局部窗口作为第一版，以质量优先；如果未来需要 streaming，再增加 causal/local causal 选项。关键约束是每个 token 只能看附近固定窗口，而不是 attend 整个长序列或整个 chunk。实现上也必须避免 full `T x T` attention 后再套 mask；应使用滑窗/块稀疏 attention，使注意力 logits 规模随 `T * window` 增长。当前实现优先走 `flash_attn_func(window_size=(w,w))`，仅在 CPU、float32、head_dim 不适配或缺少 `flash-attn` 时回退到 PyTorch `unfold` 滑窗。
 
 ### RVQ
 

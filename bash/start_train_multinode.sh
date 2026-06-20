@@ -2,9 +2,8 @@
 set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
-EXPERIMENT="${EXPERIMENT:-mossland-codec-rvq1024}"
-
+PYTHON_BIN="${PYTHON_BIN:-/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/py_env/bin/python}"
+EXPERIMENT="${EXPERIMENT:-mossland-codec-no-rvq}"
 : "${PET_NPROC_PER_NODE:?PET_NPROC_PER_NODE is required}"
 : "${PET_NNODES:?PET_NNODES is required}"
 : "${PET_NODE_RANK:?PET_NODE_RANK is required}"

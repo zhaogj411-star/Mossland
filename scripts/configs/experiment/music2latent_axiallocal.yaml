@@ -1,8 +1,8 @@
 # @package _global_
 
-project_name: music2latent-localattention
+project_name: music2latent-axiallocal
 checkpoint_monitor: loss/total
-tags: ["music2latent", "localattention", "same-temporal"]
+tags: ["music2latent", "same", "axial-local-denoiser"]
 seed: 42
 resume_from_ckpt: null
 pretrain_ckpt_path: null
@@ -37,7 +37,7 @@ data:
   prefetch_factor: 2
 
 model:
-  _target_: scripts.music2latent.models.Music2Latent_sametemporal
+  _target_: scripts.music2latent.models.Music2Latent_axiallocal
   sample_rate: 44100
   base_channels: 64
   data_channels: 2
@@ -68,12 +68,16 @@ model:
   frequency_scaling: true
   pre_normalize_2d_to_1d: true
   pre_normalize_downsampling_encoder: true
-  same_transformer_depth: 1
-  same_dim_heads: 64
-  same_sliding_window: [1, 1]
-  same_ff_mult: 1
-  same_differential: false
-  same_dyt: false
+  axial_transformer_depth: 1
+  axial_dim_heads: 64
+  axial_time_window: [1, 1]
+  axial_freq_window: [1, 1]
+  axial_use_freq_axis: true
+  axial_differential: false
+  axial_dyt: true
+  axial_ff_mult: 1
+  axial_init_as_zero: true
+  axial_min_channels: 256
   audio_processor:
     _target_: scripts.music2latent.audio.AudioProcessor
     alpha_rescale: 0.65

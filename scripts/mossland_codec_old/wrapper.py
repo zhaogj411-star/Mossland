@@ -751,12 +751,14 @@ class MosslandCodecTrainingCallback(pl.Callback):
             torch.cuda.empty_cache()
 
     def _set_eval(self, model):
-        was_training = model.training
-        model.eval()
+        was_training = bool(getattr(model, "training", False))
+        if hasattr(model, "eval"):
+            model.eval()
         return was_training
 
     def _restore_training(self, model, was_training: bool):
-        model.train(was_training)
+        if hasattr(model, "train"):
+            model.train(was_training)
 
     def _demo_quantizer_rates(self, model) -> list[int | None]:
         if getattr(model, "bottleneck_type", None) not in {"packed_rvq", "causal_rvq"}:

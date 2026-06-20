@@ -6,8 +6,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RCLONE="${RCLONE:-${REPO_ROOT}/scripts/tools/oss_tools/bin/rclone}"
 RCLONE_CONFIG="${RCLONE_CONFIG:-${REPO_ROOT}/scripts/tools/oss_tools/rclone.conf}"
 
-DEFAULT_LOCAL_SRC="/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER"
-DEFAULT_OSS_DST="qz_oss2:embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER"
+DEFAULT_LOCAL_SRC="/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-12_12-46-36/checkpoints/last.ckpt"
+DEFAULT_OSS_DST="qz_oss2:embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-12_12-46-36/checkpoints"
 
 LOCAL_SRC="${1:-${LOCAL_SRC:-${DEFAULT_LOCAL_SRC}}}"
 OSS_DST="${2:-${OSS_DST:-${DEFAULT_OSS_DST}}}"

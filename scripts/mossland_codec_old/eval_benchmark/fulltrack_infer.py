@@ -126,7 +126,7 @@ def generate_chunked_prediction(
     output_dir: str | Path,
     chunk_overlap_seconds: float,
     chunk_batch_size: int = 1,
-    dont_quantize: bool = True,
+    quantize: bool = False,
     overwrite: bool = False,
 ) -> tuple[Path, dict[str, int | float | str]]:
     if item.task_id not in CHUNKED_TASKS:
@@ -193,7 +193,7 @@ def generate_chunked_prediction(
         _, generated_batch = model.generate_waveform(
             chunk_batch,
             task_id=item.task_id,
-            dont_quantize=dont_quantize,
+            quantize=quantize,
         )
         generated_batch = generated_batch.detach().cpu().float()
         for offset, (start, _) in enumerate(batch_ranges):
@@ -245,7 +245,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-items", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1, help="Number of manifest shards for this inference run.")
     parser.add_argument("--shard-id", type=int, default=0, help="Zero-based shard id for --num-shards.")
-    parser.add_argument("--dont-quantize", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--continuous", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--progress-every", type=int, default=1)
     return parser.parse_args()
@@ -279,7 +279,7 @@ def main() -> None:
             args.output_dir,
             chunk_overlap_seconds=args.chunk_overlap_seconds,
             chunk_batch_size=args.chunk_batch_size,
-            dont_quantize=args.dont_quantize,
+            quantize=not args.continuous,
             overwrite=args.overwrite,
         )
         metadata = dict(item.metadata)

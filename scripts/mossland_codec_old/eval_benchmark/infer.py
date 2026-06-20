@@ -82,7 +82,7 @@ def generate_prediction(
     model,
     item: EvalItem,
     output_dir: str | Path,
-    dont_quantize: bool = True,
+    quantize: bool = False,
     overwrite: bool = False,
 ) -> Path:
     output_path = prediction_path_for_item(item, output_dir)
@@ -96,7 +96,7 @@ def generate_prediction(
     _, generated = model.generate_waveform(
         source,
         task_id=item.task_id,
-        dont_quantize=dont_quantize,
+        quantize=quantize,
     )
     prediction = generated.squeeze(0)
     save_audio(output_path, prediction, item.sample_rate)

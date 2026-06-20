@@ -4,6 +4,17 @@ from torch import nn
 from .transformer_layers import MLP, AttentionBlock, AdaptiveNorm, zero_init, init
 
 
+def positional_embedding_for_length(pe: torch.Tensor, length: int, dtype: torch.dtype) -> torch.Tensor:
+    if length <= pe.shape[1]:
+        return pe[:, :length].to(dtype=dtype)
+    return nn.functional.interpolate(
+        pe.transpose(1, 2).float(),
+        size=length,
+        mode="linear",
+        align_corners=False,
+    ).transpose(1, 2).to(dtype=dtype)
+
+
 class Transformer(nn.Module):
     def __init__(self, input_dim, output_dim, training_length=None, dim=512, num_layers=12, heads=8, mlp_mult=4, pos_emb='learned', autoregressive=False, latents_per_timestep=None, dropout=0.):
         super().__init__()
@@ -41,7 +52,7 @@ class Transformer(nn.Module):
         x = torch.cat([x, latent], dim=-2)
 
         if self.pe is not None:
-            pe = self.pe[:, :x.size(-2)]
+            pe = positional_embedding_for_length(self.pe, x.size(-2), x.dtype)
             x = x + pe
 
         if self.pe_latents_per_timestep is not None:
@@ -123,7 +134,7 @@ class Transformer_Diffusion(nn.Module):
                 x = torch.cat([x1, lat1, x2, lat2], dim=-2)
 
         if self.pe is not None:
-            pe = self.pe[:, :x.size(-2)]
+            pe = positional_embedding_for_length(self.pe, x.size(-2), x.dtype)
             x = x + pe
 
         if self.pe_latents_per_timestep is not None:

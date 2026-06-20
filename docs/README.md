@@ -12,9 +12,11 @@
 - `same-training.md`：判断 `scripts/same` 训练 wrapper 与 SAME 论文/Stable Audio Tools 公开训练代码的对齐程度、已实现 loss/discriminator 和剩余 auxiliary/stage 缺口时使用。
 - `exp/same_flow_exp.md`：持续调试 `scripts/same_flow` 的 SAME-style Music2Latent 一致性重建实验记录、结构调整、评估命令和指标时使用。
 - `exp/same_flow_music2latent_exp.md`：以 Music2Latent 官方训练过程为基准，逐步替换为 `scripts/same` 模块并比较 loss/梯度时使用。
+- `music2latent.md`：读取独立 `scripts/music2latent` 训练包、YAML 参数、RVQ 旁路和 demo 输出约定时使用。
 - `evaluation-metrics.md`：调研 `scripts/mossland-codec/tasks.py` 中 5 个任务的评估指标、论文依据和可复用代码仓库时使用。
 - `eval-benchmark-report.md`：跟踪 Mossland eval pipeline、论文指标复现状态、真实运行结果和剩余缺口时使用。
 - `superpowers/specs/2026-06-17-mossland-codec-time-aligned-rvq-design.md`：当前有效的 Mossland codec RVQ 设计，使用 local Transformer 输出 25Hz 时间对齐 token，连续表征为 32 维/token，离散表征为每 token 16 层 RVQ。
+- `superpowers/plans/2026-06-17-mossland-codec-time-aligned-rvq-implementation.md`：当前有效的 time-aligned RVQ 实施计划，按 TDD 分阶段替换 FSQ、接入 local time-token encoder、动态 RVQ、训练/推理/demo 和文档更新。
 - `superpowers/specs/2026-06-17-mossland-codec-rvq-design.md`：已废弃的 512 维 chunk-summary RVQ 设计；仅用于了解为什么该方案不能解决 time alignment。
 - `superpowers/plans/2026-06-17-mossland-codec-rvq-implementation.md`：已废弃的 chunk-summary RVQ 实施计划；不要执行。
 - `papers/README.md`：评估指标调研下载论文 PDF 的本地索引。

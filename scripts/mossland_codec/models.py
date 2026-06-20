@@ -1,7 +1,6 @@
-from scripts.music2latent.audio import AudioProcessor
-from scripts.music2latent.local_transformer import AxialLocalAttentionResBlock
-from scripts.music2latent.quantize import ResidualVectorQuantize
-from scripts.same.transformer import TransformerBlock as SameTransformerBlock
+from .audio import AudioProcessor
+from .quantize import ResidualVectorQuantize
+from .tasks import TASK_NAMES
 
 # from .audio import *
 import soundfile as sf
@@ -768,7 +767,7 @@ class DecoderSameTemporal(Decoder):
         )
 
 
-class Music2Latent(nn.Module):
+class MosslandCodec(nn.Module):
     # U-Net模型
     def __init__(
         self,
@@ -814,9 +813,16 @@ class Music2Latent(nn.Module):
         quantizer_kmeans_init=True,
         quantizer_kmeans_iters=10,
         quantizer_threshold_ema_dead_code=2,
+        task_names: list[str] | tuple[str, ...] | None = None,
+        task_embedding_init_std: float = 0.02,
         **kwargs
     ):
-        super(Music2Latent, self).__init__()
+        super().__init__()
+        if task_names is None:
+            task_names = TASK_NAMES
+        task_names = tuple(str(name) for name in task_names)
+        if not task_names:
+            raise ValueError("task_names must not be empty")
         self.sigma_max = sigma_max
         self.frequency_scaling = frequency_scaling
         self.layers_list = layers_list
@@ -844,6 +850,9 @@ class Music2Latent(nn.Module):
         self.sigma_min = sigma_min
         self.sigma_data = sigma_data
         self.rho = rho
+        self.task_names = task_names
+        self.task_to_idx = {name: idx for idx, name in enumerate(self.task_names)}
+        self.task_embedding_init_std = float(task_embedding_init_std)
         Conv = nn.Conv2d
         ## audio processor
         self.audio_processor = audio_processor
@@ -913,6 +922,12 @@ class Music2Latent(nn.Module):
             nn.SiLU(),
             nn.Linear(cond_channels, cond_channels),
             nn.SiLU(),
+        )
+        self.task_embedding = nn.Embedding(len(self.task_names), cond_channels)
+        nn.init.normal_(
+            self.task_embedding.weight,
+            mean=0.0,
+            std=self.task_embedding_init_std,
         )
 
         self.scale_inp = nn.Sequential(
@@ -1058,7 +1073,7 @@ class Music2Latent(nn.Module):
         n_quantizers=None,
     ):
         if self.quantizer is None:
-            raise RuntimeError("Music2Latent quantizer is disabled")
+            raise RuntimeError("MosslandCodec quantizer is disabled")
 
         continuous, hidden = self.encoder(representation, return_hidden=True)
         quantizer_input = hidden.detach() if detach_encoder else hidden
@@ -1082,7 +1097,7 @@ class Music2Latent(nn.Module):
 
     def latent_from_codes(self, codes):
         if self.quantizer is None:
-            raise RuntimeError("Music2Latent quantizer is disabled")
+            raise RuntimeError("MosslandCodec quantizer is disabled")
         quantized_hidden, _ = self.quantizer.from_codes(codes)
         return self.encoder.hidden_to_latent(quantized_hidden)
 
@@ -1095,6 +1110,8 @@ class Music2Latent(nn.Module):
         max_batch_size=None,
         rescale=1,
         target_length=None,
+        task_id="reconstruct",
+        task_idx=None,
     ):
         codes = (
             torch.from_numpy(codes).to(next(self.parameters()).device)
@@ -1111,9 +1128,99 @@ class Music2Latent(nn.Module):
             max_batch_size=max_batch_size,
             rescale=rescale,
             target_length=target_length,
+            task_id=task_id,
+            task_idx=task_idx,
         )
 
-    def forward(self, latents, x, sigma=None, pyramid_latents=None, latent_override=None):
+    @staticmethod
+    def _lookup_condition_index(lookup, value, strict: bool):
+        key = str(value)
+        if key in lookup:
+            return lookup[key]
+        if strict:
+            raise KeyError(key)
+        return 0
+
+    def _coerce_condition_indices(self, values, indices, batch_size, device):
+        if indices is not None:
+            if torch.is_tensor(indices):
+                idx = indices.to(device=device, dtype=torch.long).reshape(-1)
+            else:
+                idx = torch.as_tensor(indices, device=device, dtype=torch.long).reshape(-1)
+        else:
+            if values is None:
+                values = self.task_names[0]
+            if isinstance(values, str):
+                idx = torch.full(
+                    (batch_size,),
+                    self._lookup_condition_index(self.task_to_idx, values, strict=True),
+                    device=device,
+                    dtype=torch.long,
+                )
+            else:
+                if torch.is_tensor(values):
+                    idx = values.to(device=device, dtype=torch.long).reshape(-1)
+                else:
+                    value_list = list(values) if isinstance(values, (list, tuple)) else [values]
+                    idx = torch.tensor(
+                        [
+                            self._lookup_condition_index(self.task_to_idx, value, strict=False)
+                            for value in value_list
+                        ],
+                        device=device,
+                        dtype=torch.long,
+                    )
+
+        if idx.numel() == 1:
+            return idx.expand(batch_size)
+        if idx.numel() == batch_size:
+            return idx
+        if idx.numel() * 2 == batch_size:
+            return torch.cat((idx, idx), dim=0)
+        raise ValueError(
+            f"condition batch size mismatch: got {idx.numel()}, expected 1, "
+            f"{batch_size // 2}, or {batch_size}"
+        )
+
+    def _condition_embedding(self, sigma_embedding, task_id="reconstruct", task_idx=None):
+        task_idx = self._coerce_condition_indices(
+            task_id,
+            task_idx,
+            sigma_embedding.shape[0],
+            sigma_embedding.device,
+        )
+        cond = sigma_embedding + self.task_embedding(task_idx).to(sigma_embedding.dtype)
+        return self.emb_proj(cond)
+
+    @staticmethod
+    def _slice_condition_values(values, start: int, end: int):
+        if values is None or isinstance(values, str):
+            return values
+        if torch.is_tensor(values):
+            flat = values.reshape(-1)
+            if flat.numel() >= end:
+                return flat[start:end]
+            return values
+        if isinstance(values, tuple):
+            if len(values) >= end:
+                return values[start:end]
+            return values
+        if isinstance(values, list):
+            if len(values) >= end:
+                return values[start:end]
+            return values
+        return values
+
+    def forward(
+        self,
+        latents,
+        x,
+        sigma=None,
+        pyramid_latents=None,
+        latent_override=None,
+        task_id="reconstruct",
+        task_idx=None,
+    ):
         dtype = next(self.parameters()).dtype
         x = x.to(dtype)
         latents = latents.to(dtype)
@@ -1126,10 +1233,14 @@ class Music2Latent(nn.Module):
         sigma_log = torch.log(sigma) / 4.0
         emb_sigma_log = self.emb(sigma_log.to(dtype)).to(dtype)
         # breakpoint()
-        time_emb = self.emb_proj(emb_sigma_log)
+        time_emb = self._condition_embedding(
+            emb_sigma_log,
+            task_id=task_id,
+            task_idx=task_idx,
+        )
 
-        scale_w_inp = self.scale_inp(emb_sigma_log).reshape(x.shape[0], 1, -1, 1)
-        scale_w_out = self.scale_out(emb_sigma_log).reshape(x.shape[0], 1, -1, 1)
+        scale_w_inp = self.scale_inp(time_emb).reshape(x.shape[0], 1, -1, 1)
+        scale_w_out = self.scale_out(time_emb).reshape(x.shape[0], 1, -1, 1)
 
         c_skip, c_out, c_in = self._get_c(sigma)
 
@@ -1256,7 +1367,7 @@ class Music2Latent(nn.Module):
                 aligned_frames * self.hop
                 + (self.audio_processor.fac - 1) * self.hop
             )
-        
+
         # 裁剪或填充到目标长度
         if original_length > target_length:
             audio = audio[..., :target_length]
@@ -1293,6 +1404,8 @@ class Music2Latent(nn.Module):
         max_batch_size=None,
         rescale=1,
         target_length=None,
+        task_id="reconstruct",
+        task_idx=None,
     ):
         """解码潜变量到音频
 
@@ -1326,7 +1439,7 @@ class Music2Latent(nn.Module):
 
         # 计算下采样因子
         downscaling_factor = 2 ** sum(1 for x in self.freq_downsample_list if x == 0)
-        
+
         latent_length = latent.shape[-1]
         max_latent_length = int(max_waveform_length / self.hop) // downscaling_factor
 
@@ -1335,16 +1448,16 @@ class Music2Latent(nn.Module):
             # 简单分段处理，不使用重叠
             latent_segments = []
             start_idx = 0
-            
+
             while start_idx < latent_length:
                 end_idx = min(start_idx + max_latent_length, latent_length)
                 segment = latent[:, :, start_idx:end_idx]
-                
+
                 if segment.shape[-1] > 0:
                     latent_segments.append(segment)
-                    
+
                 start_idx = end_idx
-            
+
             # 批处理解码
             repr_segments = []
             for segment in latent_segments:
@@ -1352,13 +1465,27 @@ class Music2Latent(nn.Module):
                     segment_chunks = torch.split(segment, max_batch_size, dim=0)
                     segment_reprs = []
                     for chunk in segment_chunks:
-                        repr_chunk = self._decode_to_representation(chunk, denoising_steps, device)
+                        start = len(segment_reprs) * max_batch_size
+                        end = start + chunk.shape[0]
+                        repr_chunk = self._decode_to_representation(
+                            chunk,
+                            denoising_steps,
+                            device,
+                            task_id=self._slice_condition_values(task_id, start, end),
+                            task_idx=self._slice_condition_values(task_idx, start, end),
+                        )
                         segment_reprs.append(repr_chunk)
                     segment_repr = torch.cat(segment_reprs, dim=0)
                 else:
-                    segment_repr = self._decode_to_representation(segment, denoising_steps, device)
+                    segment_repr = self._decode_to_representation(
+                        segment,
+                        denoising_steps,
+                        device,
+                        task_id=task_id,
+                        task_idx=task_idx,
+                    )
                 repr_segments.append(segment_repr)
-            
+
             # 简单拼接segments
             repr = torch.cat(repr_segments, dim=-1)
         else:
@@ -1367,15 +1494,29 @@ class Music2Latent(nn.Module):
                 latent_chunks = torch.split(latent, max_batch_size, dim=0)
                 repr_chunks = []
                 for chunk in latent_chunks:
-                    repr_chunk = self._decode_to_representation(chunk, denoising_steps, device)
+                    start = len(repr_chunks) * max_batch_size
+                    end = start + chunk.shape[0]
+                    repr_chunk = self._decode_to_representation(
+                        chunk,
+                        denoising_steps,
+                        device,
+                        task_id=self._slice_condition_values(task_id, start, end),
+                        task_idx=self._slice_condition_values(task_idx, start, end),
+                    )
                     repr_chunks.append(repr_chunk)
                 repr = torch.cat(repr_chunks, dim=0)
             else:
-                repr = self._decode_to_representation(latent, denoising_steps, device)
+                repr = self._decode_to_representation(
+                    latent,
+                    denoising_steps,
+                    device,
+                    task_id=task_id,
+                    task_idx=task_idx,
+                )
 
         # 转换为波形
         audio = self.audio_processor.to_waveform(repr, self.hop)
-        
+
         # 如果指定了目标长度，精确裁剪到原始长度
         if target_length is not None:
             if audio.shape[-1] > target_length:
@@ -1384,10 +1525,17 @@ class Music2Latent(nn.Module):
                 # 如果音频太短，用零填充
                 pad_size = target_length - audio.shape[-1]
                 audio = F.pad(audio, (0, pad_size), mode='constant', value=0)
-        
+
         return audio
 
-    def _decode_to_representation(self, latents, diffusion_steps=1, device=None):
+    def _decode_to_representation(
+        self,
+        latents,
+        diffusion_steps=1,
+        device=None,
+        task_id="reconstruct",
+        task_idx=None,
+    ):
         """解码潜变量到频谱表示"""
         device = device or next(self.parameters()).device
         num_samples = latents.shape[0]
@@ -1401,7 +1549,13 @@ class Music2Latent(nn.Module):
             * self.sigma_max
         )
 
-        return self._reverse_diffusion(initial_noise, diffusion_steps, latents)
+        return self._reverse_diffusion(
+            initial_noise,
+            diffusion_steps,
+            latents,
+            task_id=task_id,
+            task_idx=task_idx,
+        )
 
     def _get_c(self, sigma):
         """获取缩放系数 c_skip, c_out, c_in"""
@@ -1431,20 +1585,33 @@ class Music2Latent(nn.Module):
         """反向一步ODE"""
         return x + ((sigma**2 - self.sigma_min**2) ** 0.5) * noise
 
-    def _denoise(self, noisy_samples, sigma, latents=None):
+    def _denoise(self, noisy_samples, sigma, latents=None, task_id="reconstruct", task_idx=None):
         """对给定噪声水平的样本去噪"""
         with torch.no_grad():
             with torch.autocast(
                 device_type="cuda", dtype=torch.float16, enabled=self.mixed_precision
             ):
                 if latents is not None:
-                    pred_samples = self(latents, noisy_samples, sigma)
+                    pred_samples = self(
+                        latents,
+                        noisy_samples,
+                        sigma,
+                        task_id=task_id,
+                        task_idx=task_idx,
+                    )
                 else:
-                    pred_samples = self(noisy_samples, sigma)
+                    pred_samples = self(noisy_samples, sigma, task_id=task_id, task_idx=task_idx)
         pred_noises = torch.randn_like(pred_samples)
         return pred_noises, pred_samples
 
-    def _reverse_diffusion(self, initial_noise, diffusion_steps, latents=None):
+    def _reverse_diffusion(
+        self,
+        initial_noise,
+        diffusion_steps,
+        latents=None,
+        task_id="reconstruct",
+        task_idx=None,
+    ):
         """反向扩散过程生成样本"""
         next_noisy_samples = initial_noise
         for k in range(diffusion_steps):
@@ -1452,7 +1619,13 @@ class Music2Latent(nn.Module):
             next_sigma = self._get_sigma(diffusion_steps - k, diffusion_steps + 1)
 
             noisy_samples = next_noisy_samples
-            pred_noises, pred_samples = self._denoise(noisy_samples, sigma, latents)
+            pred_noises, pred_samples = self._denoise(
+                noisy_samples,
+                sigma,
+                latents,
+                task_id=task_id,
+                task_idx=task_idx,
+            )
             next_noisy_samples = self._reverse_step(
                 pred_samples, pred_noises, next_sigma
             )
@@ -1482,16 +1655,16 @@ class Music2Latent(nn.Module):
             # 简单分段处理，不使用重叠
             x_segments = []
             start_idx = 0
-            
+
             while start_idx < sample_length:
                 end_idx = min(start_idx + max_sample_length, sample_length)
                 segment = x[:, :, :, start_idx:end_idx]
-                
+
                 if segment.shape[-1] > 0:
                     x_segments.append(segment)
-                    
+
                 start_idx = end_idx
-            
+
             # 批处理编码
             latent_segments = []
             for segment in x_segments:
@@ -1525,7 +1698,7 @@ class Music2Latent(nn.Module):
                             n_quantizers=n_quantizers,
                         )
                 latent_segments.append(segment_latent)
-            
+
             # 简单拼接segments
             latent = torch.cat(latent_segments, dim=-1)
         else:
@@ -1586,1257 +1759,3 @@ class Music2Latent(nn.Module):
         if return_codes:
             return quantized.codes
         return quantized.discrete
-
-
-class Music2Latent_axiallocal(Music2Latent):
-    """Music2Latent with SAME-style axial local attention in the denoising U-Net.
-
-    This keeps the official encoder, latent pyramid decoder, diffusion wrapper
-    semantics, and explicit down/up resampling layers. Only 2D denoising U-Net
-    `ResBlock` modules are replaced with axial local Transformer blocks copied
-    into `scripts.music2latent.local_transformer`.
-    """
-
-    def __init__(
-        self,
-        *args,
-        axial_transformer_depth=1,
-        axial_dim_heads=64,
-        axial_time_window=(1, 1),
-        axial_freq_window=(1, 1),
-        axial_use_freq_axis=True,
-        axial_differential=False,
-        axial_dyt=True,
-        axial_ff_mult=1,
-        axial_init_as_zero=True,
-        axial_min_channels=256,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.axial_transformer_depth = int(axial_transformer_depth)
-        self.axial_dim_heads = int(axial_dim_heads)
-        self.axial_time_window = tuple(axial_time_window) if axial_time_window is not None else None
-        self.axial_freq_window = tuple(axial_freq_window) if axial_freq_window is not None else None
-        self.axial_use_freq_axis = bool(axial_use_freq_axis)
-        self.axial_differential = bool(axial_differential)
-        self.axial_dyt = bool(axial_dyt)
-        self.axial_ff_mult = int(axial_ff_mult)
-        self.axial_init_as_zero = bool(axial_init_as_zero)
-        self.axial_min_channels = int(axial_min_channels)
-        self.axial_replaced_modules = 0
-        self.axial_replaced_modules += self._replace_denoiser_resblocks(self.down_layers)
-        self.axial_replaced_modules += self._replace_denoiser_resblocks(self.up_layers)
-
-    def _replace_denoiser_resblocks(self, layers):
-        replaced = 0
-        for idx, layer in enumerate(layers):
-            if isinstance(layer, ResBlock) and getattr(layer, "use_2d", False):
-                if int(layer.conv1.out_channels) < self.axial_min_channels:
-                    continue
-                layers[idx] = AxialLocalAttentionResBlock.from_resblock(
-                    layer,
-                    transformer_depth=self.axial_transformer_depth,
-                    dim_heads=self.axial_dim_heads,
-                    time_window=self.axial_time_window,
-                    freq_window=self.axial_freq_window,
-                    use_freq_axis=self.axial_use_freq_axis,
-                    differential=self.axial_differential,
-                    dyt=self.axial_dyt,
-                    ff_mult=self.axial_ff_mult,
-                    init_as_zero=self.axial_init_as_zero,
-                )
-                replaced += 1
-        return replaced
-
-
-def _load_natten_layer(layer_name):
-    try:
-        import natten
-    except Exception as exc:
-        raise ImportError(
-            "Music2Latent_localattention requires NATTEN. Install a wheel matching "
-            "the local PyTorch/CUDA runtime, for example from https://whl.natten.org."
-        ) from exc
-    try:
-        return getattr(natten, layer_name)
-    except AttributeError as exc:
-        raise ImportError(f"NATTEN does not provide {layer_name}") from exc
-
-
-def _make_natten_1d(dim, num_heads, kernel_size, dilation=1):
-    Layer = _load_natten_layer("NeighborhoodAttention1D")
-    kwargs = dict(
-        embed_dim=dim,
-        num_heads=num_heads,
-        kernel_size=kernel_size,
-        stride=1,
-        dilation=dilation,
-        is_causal=False,
-    )
-    try:
-        return Layer(**kwargs)
-    except TypeError:
-        kwargs.pop("dilation", None)
-    try:
-        return Layer(**kwargs)
-    except TypeError:
-        kwargs.pop("stride", None)
-        kwargs.pop("is_causal", None)
-        return Layer(**kwargs)
-
-
-def _make_natten_2d(dim, num_heads, kernel_size, dilation=1):
-    Layer = _load_natten_layer("NeighborhoodAttention2D")
-    kwargs = dict(
-        embed_dim=dim,
-        num_heads=num_heads,
-        kernel_size=kernel_size,
-        stride=1,
-        dilation=dilation,
-        is_causal=False,
-    )
-    try:
-        return Layer(**kwargs)
-    except TypeError:
-        kwargs.pop("dilation", None)
-    try:
-        return Layer(**kwargs)
-    except TypeError:
-        kwargs.pop("stride", None)
-        kwargs.pop("is_causal", None)
-        return Layer(**kwargs)
-
-
-def _natten_heads(channels, requested_heads):
-    requested_heads = max(1, min(int(requested_heads), int(channels)))
-    for heads in range(requested_heads, 0, -1):
-        if channels % heads == 0:
-            return heads
-    return 1
-
-
-def _channel_last_1d(x):
-    return x.transpose(1, 2)
-
-
-def _channel_first_1d(x):
-    return x.transpose(1, 2)
-
-
-def _channel_last_2d(x):
-    return x.permute(0, 2, 3, 1)
-
-
-def _channel_first_2d(x):
-    return x.permute(0, 3, 1, 2)
-
-
-class ChannelLinear1d(nn.Module):
-    def __init__(self, in_channels, out_channels, zero=False):
-        super().__init__()
-        self.proj = nn.Linear(in_channels, out_channels)
-        if zero:
-            zero_init(self.proj)
-
-    def forward(self, x):
-        x = _channel_last_1d(x)
-        x = self.proj(x)
-        return _channel_first_1d(x)
-
-
-class ChannelLinear2d(nn.Module):
-    def __init__(self, in_channels, out_channels, zero=False):
-        super().__init__()
-        self.proj = nn.Linear(in_channels, out_channels)
-        if zero:
-            zero_init(self.proj)
-
-    def forward(self, x):
-        x = _channel_last_2d(x)
-        x = self.proj(x)
-        return _channel_first_2d(x)
-
-
-def _same_dim_heads(dim, requested):
-    dim = int(dim)
-    requested = min(int(requested), dim)
-    for dim_heads in range(requested, 0, -1):
-        if dim % dim_heads == 0:
-            return dim_heads
-    return 1
-
-
-def _same_sliding_window(sliding_window):
-    if sliding_window is None:
-        raise ValueError("SAME temporal attention requires a sliding window")
-    if len(sliding_window) != 2:
-        raise ValueError("same_sliding_window must contain [left, right]")
-    return (int(sliding_window[0]), int(sliding_window[1]))
-
-
-class SameTemporalOp1d(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels=None,
-        transformer_depth=1,
-        dim_heads=64,
-        sliding_window=(1, 1),
-        ff_mult=1,
-        differential=False,
-        dyt=False,
-        zero=False,
-    ):
-        super().__init__()
-        out_channels = in_channels if out_channels is None else out_channels
-        self.sliding_window = _same_sliding_window(sliding_window)
-        self.in_proj = nn.Linear(in_channels, out_channels)
-        same_dim_heads = _same_dim_heads(out_channels, dim_heads)
-        self.layers = nn.ModuleList(
-            [
-                SameTransformerBlock(
-                    out_channels,
-                    dim_heads=same_dim_heads,
-                    zero_init_branch_outputs=True,
-                    norm_type="dyt" if dyt else "rms_norm",
-                    add_rope=True,
-                    attn_kwargs={
-                        "qk_norm": "dyt" if dyt else "rms",
-                        "qk_norm_eps": 1e-3,
-                        "differential": bool(differential),
-                    },
-                    ff_kwargs={"mult": int(ff_mult)},
-                    norm_kwargs={"eps": 1e-3},
-                )
-                for _ in range(int(transformer_depth))
-            ]
-        )
-        self.out_proj = nn.Linear(out_channels, out_channels)
-        if zero:
-            zero_init(self.out_proj)
-
-    def forward(self, x):
-        x = _channel_last_1d(x)
-        x = self.in_proj(x)
-        for layer in self.layers:
-            x = layer(x, self_attention_flash_sliding_window=self.sliding_window)
-        x = self.out_proj(x)
-        return _channel_first_1d(x)
-
-
-class SameTemporalResBlock1d(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        cond_channels=None,
-        downsample=False,
-        upsample=False,
-        normalize=True,
-        leaky=False,
-        attention=False,
-        dropout_rate=0,
-        min_res_dropout=16,
-        transformer_depth=1,
-        dim_heads=64,
-        sliding_window=(1, 1),
-        ff_mult=1,
-        differential=False,
-        dyt=False,
-    ):
-        super().__init__()
-        self.normalize = normalize
-        self.attention = attention
-        self.upsample = upsample
-        self.downsample = downsample
-        self.min_res_dropout = min_res_dropout
-        self.conv1 = SameTemporalOp1d(
-            in_channels,
-            out_channels,
-            transformer_depth=transformer_depth,
-            dim_heads=dim_heads,
-            sliding_window=sliding_window,
-            ff_mult=ff_mult,
-            differential=differential,
-            dyt=dyt,
-        )
-        self.conv2 = SameTemporalOp1d(
-            out_channels,
-            out_channels,
-            transformer_depth=transformer_depth,
-            dim_heads=dim_heads,
-            sliding_window=sliding_window,
-            ff_mult=ff_mult,
-            differential=differential,
-            dyt=dyt,
-            zero=True,
-        )
-        self.res_conv = (
-            ChannelLinear1d(in_channels, out_channels)
-            if in_channels != out_channels
-            else nn.Identity()
-        )
-        if normalize:
-            self.norm1 = nn.GroupNorm(min(in_channels // 4, 32), in_channels)
-            self.norm2 = nn.GroupNorm(min(out_channels // 4, 32), out_channels)
-        self.activation = nn.LeakyReLU(negative_slope=0.2) if leaky else nn.SiLU()
-        if cond_channels is not None:
-            self.proj_emb = zero_init(nn.Linear(cond_channels, out_channels))
-        self.dropout = nn.Dropout(dropout_rate)
-        if attention:
-            self.att = SameTemporalOp1d(
-                out_channels,
-                out_channels,
-                transformer_depth=transformer_depth,
-                dim_heads=dim_heads,
-                sliding_window=sliding_window,
-                ff_mult=ff_mult,
-                differential=differential,
-                dyt=dyt,
-            )
-
-    def forward(self, x, time_emb=None):
-        y = x.clone()
-        if self.normalize:
-            x = self.norm1(x)
-        x = self.activation(x)
-        if self.downsample:
-            x = downsample_1d(x)
-            y = downsample_1d(y)
-        if self.upsample:
-            x = upsample_1d(x)
-            y = upsample_1d(y)
-        x = self.conv1(x)
-        if time_emb is not None:
-            x = x + self.proj_emb(time_emb)[:, :, None]
-        if self.normalize:
-            x = self.norm2(x)
-        x = self.activation(x)
-        if x.shape[-1] <= self.min_res_dropout:
-            x = self.dropout(x)
-        x = self.conv2(x)
-        x = x + self.res_conv(y)
-        if self.attention:
-            x = self.att(x)
-        return x
-
-
-class Music2Latent_sametemporal(Music2Latent):
-    """Music2Latent with SAME local Transformer only in 1D temporal bottlenecks."""
-
-    def __init__(
-        self,
-        same_transformer_depth=1,
-        same_dim_heads=64,
-        same_sliding_window=(1, 1),
-        same_ff_mult=1,
-        same_differential=False,
-        same_dyt=False,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.same_transformer_depth = int(same_transformer_depth)
-        self.same_dim_heads = int(same_dim_heads)
-        self.same_sliding_window = _same_sliding_window(same_sliding_window)
-        self.same_ff_mult = int(same_ff_mult)
-        self.same_differential = bool(same_differential)
-        self.same_dyt = bool(same_dyt)
-
-        common_kwargs = {
-            "base_channels": kwargs.get("base_channels", 64),
-            "multipliers_list": kwargs.get("multipliers_list", [1, 2, 4, 4, 4]),
-            "freq_downsample_list": kwargs.get("freq_downsample_list", [1, 0, 0, 0]),
-            "bottleneck_base_channels": kwargs.get("bottleneck_base_channels", 512),
-            "num_bottleneck_layers": kwargs.get("num_bottleneck_layers", 4),
-            "heads": kwargs.get("heads", 4),
-            "normalization": kwargs.get("normalization", True),
-            "bottleneck_channels": kwargs.get("bottleneck_channels", 32 * 2),
-            "hop": kwargs.get("hop", 128 * 4),
-            "dropout_rate": kwargs.get("dropout_rate", 0.0),
-            "min_res_dropout": kwargs.get("min_res_dropout", 16),
-        }
-        same_kwargs = {
-            "same_transformer_depth": self.same_transformer_depth,
-            "same_dim_heads": self.same_dim_heads,
-            "same_sliding_window": self.same_sliding_window,
-            "same_ff_mult": self.same_ff_mult,
-            "same_differential": self.same_differential,
-            "same_dyt": self.same_dyt,
-        }
-        self.encoder = EncoderSameTemporal(
-            layers_list_encoder=kwargs.get("layers_list_encoder", [1, 1, 1, 1, 1]),
-            attention_list_encoder=kwargs.get("attention_list_encoder", [0, 0, 1, 1, 1]),
-            frequency_scaling=kwargs.get("frequency_scaling", True),
-            pre_normalize_2d_to_1d=kwargs.get("pre_normalize_2d_to_1d", True),
-            pre_normalize_downsampling_encoder=kwargs.get(
-                "pre_normalize_downsampling_encoder", True
-            ),
-            data_channels=kwargs.get("data_channels", 2),
-            **common_kwargs,
-            **same_kwargs,
-        )
-        self.decoder = DecoderSameTemporal(
-            layers_list=kwargs.get("layers_list", [2, 2, 2, 2, 2]),
-            attention_list=kwargs.get("attention_list", [0, 0, 1, 1, 1]),
-            layers_list_encoder=kwargs.get("layers_list_encoder", [1, 1, 1, 1, 1]),
-            attention_list_encoder=kwargs.get("attention_list_encoder", [0, 0, 1, 1, 1]),
-            cond_channels=kwargs.get("cond_channels", 256),
-            **common_kwargs,
-            **same_kwargs,
-        )
-
-
-class LocalAttention1d(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels=None,
-        kernel_size=3,
-        heads=4,
-        dilation=1,
-        zero=False,
-    ):
-        super().__init__()
-        out_channels = in_channels if out_channels is None else out_channels
-        self.in_proj = nn.Linear(in_channels, out_channels)
-        self.attn = _make_natten_1d(
-            out_channels,
-            _natten_heads(out_channels, heads),
-            kernel_size=kernel_size,
-            dilation=dilation,
-        )
-        self.out_proj = nn.Linear(out_channels, out_channels)
-        if zero:
-            zero_init(self.out_proj)
-
-    def forward(self, x):
-        x = _channel_last_1d(x)
-        x = self.in_proj(x)
-        x = self.attn(x)
-        x = self.out_proj(x)
-        return _channel_first_1d(x)
-
-
-class LocalAttention2d(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels=None,
-        kernel_size=3,
-        heads=4,
-        dilation=1,
-        zero=False,
-    ):
-        super().__init__()
-        out_channels = in_channels if out_channels is None else out_channels
-        self.in_proj = nn.Linear(in_channels, out_channels)
-        self.attn = _make_natten_2d(
-            out_channels,
-            _natten_heads(out_channels, heads),
-            kernel_size=kernel_size,
-            dilation=dilation,
-        )
-        self.out_proj = nn.Linear(out_channels, out_channels)
-        if zero:
-            zero_init(self.out_proj)
-
-    def forward(self, x):
-        x = _channel_last_2d(x)
-        x = self.in_proj(x)
-        x = self.attn(x)
-        x = self.out_proj(x)
-        return _channel_first_2d(x)
-
-
-class LocalFrequencyAttention2d(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels=None,
-        kernel_size=5,
-        heads=4,
-        dilation=1,
-        zero=False,
-    ):
-        super().__init__()
-        self.attn = LocalAttention1d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            heads=heads,
-            dilation=dilation,
-            zero=zero,
-        )
-
-    def forward(self, x):
-        batch, channels, freq, time = x.shape
-        x = x.permute(0, 3, 1, 2).reshape(batch * time, channels, freq).contiguous()
-        x = self.attn(x)
-        out_channels = x.shape[1]
-        x = x.reshape(batch, time, out_channels, freq)
-        return x.permute(0, 2, 3, 1).contiguous()
-
-
-class DownsampleLocalAttention(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels=None,
-        use_2d=False,
-        normalize=False,
-        heads=4,
-        kernel_size=3,
-    ):
-        super().__init__()
-        self.normalize = normalize
-        self.use_2d = use_2d
-        out_channels = in_channels if out_channels is None else out_channels
-        if normalize:
-            self.norm = nn.GroupNorm(min(in_channels // 4, 32), in_channels)
-        Attn = LocalAttention2d if use_2d else LocalAttention1d
-        self.attn = Attn(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            heads=heads,
-        )
-
-    def forward(self, x):
-        if self.normalize:
-            x = self.norm(x)
-        x = downsample_2d(x) if self.use_2d else downsample_1d(x)
-        return self.attn(x)
-
-
-class UpsampleLocalAttention(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels=None,
-        use_2d=False,
-        normalize=False,
-        heads=4,
-        kernel_size=3,
-    ):
-        super().__init__()
-        self.normalize = normalize
-        self.use_2d = use_2d
-        out_channels = in_channels if out_channels is None else out_channels
-        if normalize:
-            self.norm = nn.GroupNorm(min(in_channels // 4, 32), in_channels)
-        Attn = LocalAttention2d if use_2d else LocalAttention1d
-        self.attn = Attn(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            heads=heads,
-        )
-
-    def forward(self, x):
-        if self.normalize:
-            x = self.norm(x)
-        x = upsample_2d(x) if self.use_2d else upsample_1d(x)
-        return self.attn(x)
-
-
-class DownsampleFreqLocalAttention(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels=None,
-        normalize=False,
-        heads=4,
-        kernel_size=5,
-    ):
-        super().__init__()
-        self.normalize = normalize
-        out_channels = in_channels if out_channels is None else out_channels
-        if normalize:
-            self.norm = nn.GroupNorm(min(in_channels // 4, 32), in_channels)
-        self.attn = LocalFrequencyAttention2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            heads=heads,
-        )
-
-    def forward(self, x):
-        if self.normalize:
-            x = self.norm(x)
-        x = F.avg_pool2d(x, kernel_size=(4, 1), stride=(4, 1))
-        return self.attn(x)
-
-
-class UpsampleFreqLocalAttention(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels=None,
-        normalize=False,
-        heads=4,
-        kernel_size=5,
-    ):
-        super().__init__()
-        self.normalize = normalize
-        out_channels = in_channels if out_channels is None else out_channels
-        if normalize:
-            self.norm = nn.GroupNorm(min(in_channels // 4, 32), in_channels)
-        self.attn = LocalFrequencyAttention2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            heads=heads,
-        )
-
-    def forward(self, x):
-        if self.normalize:
-            x = self.norm(x)
-        x = F.interpolate(x, scale_factor=(4, 1), mode="nearest")
-        return self.attn(x)
-
-
-class ResBlockLocalAttention(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        cond_channels=None,
-        kernel_size=3,
-        downsample=False,
-        upsample=False,
-        normalize=True,
-        leaky=False,
-        attention=False,
-        heads=4,
-        use_2d=False,
-        normalize_residual=False,
-        dropout_rate=0,
-        min_res_dropout=16,
-    ):
-        super().__init__()
-        self.normalize = normalize
-        self.attention = attention
-        self.upsample = upsample
-        self.downsample = downsample
-        self.leaky = leaky
-        self.normalize_residual = normalize_residual
-        self.use_2d = use_2d
-        self.dropout_rate = dropout_rate
-        self.min_res_dropout = min_res_dropout
-        Attn = LocalAttention2d if use_2d else LocalAttention1d
-        Proj = ChannelLinear2d if use_2d else ChannelLinear1d
-        self.conv1 = Attn(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            heads=heads,
-        )
-        self.conv2 = Attn(
-            out_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            heads=heads,
-            zero=True,
-        )
-        self.res_conv = (
-            Proj(in_channels, out_channels)
-            if in_channels != out_channels
-            else nn.Identity()
-        )
-        if normalize:
-            self.norm1 = nn.GroupNorm(min(in_channels // 4, 32), in_channels)
-            self.norm2 = nn.GroupNorm(min(out_channels // 4, 32), out_channels)
-        self.activation = nn.LeakyReLU(negative_slope=0.2) if leaky else nn.SiLU()
-        if cond_channels is not None:
-            self.proj_emb = zero_init(nn.Linear(cond_channels, out_channels))
-        self.dropout = nn.Dropout(dropout_rate)
-        if attention:
-            self.att = Attn(
-                out_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                heads=heads,
-            )
-
-    def forward(self, x, time_emb=None):
-        if not self.normalize_residual:
-            y = x.clone()
-        if self.normalize:
-            x = self.norm1(x)
-        if self.normalize_residual:
-            y = x.clone()
-        x = self.activation(x)
-        if self.downsample:
-            if self.use_2d:
-                x = downsample_2d(x)
-                y = downsample_2d(y)
-            else:
-                x = downsample_1d(x)
-                y = downsample_1d(y)
-        if self.upsample:
-            if self.use_2d:
-                x = upsample_2d(x)
-                y = upsample_2d(y)
-            else:
-                x = upsample_1d(x)
-                y = upsample_1d(y)
-        x = self.conv1(x)
-        if time_emb is not None:
-            if self.use_2d:
-                x = x + self.proj_emb(time_emb)[:, :, None, None]
-            else:
-                x = x + self.proj_emb(time_emb)[:, :, None]
-        if self.normalize:
-            x = self.norm2(x)
-        x = self.activation(x)
-        if x.shape[-1] <= self.min_res_dropout:
-            x = self.dropout(x)
-        x = self.conv2(x)
-        y = self.res_conv(y)
-        x = x + y
-        if self.attention:
-            x = self.att(x)
-        return x
-
-
-class EncoderLocalAttention(nn.Module):
-    def __init__(
-        self,
-        base_channels=64,
-        layers_list_encoder=[1, 1, 1, 1, 1],
-        multipliers_list=[1, 2, 4, 4, 4],
-        attention_list_encoder=[0, 0, 1, 1, 1],
-        freq_downsample_list=[1, 0, 0, 0],
-        bottleneck_base_channels=512,
-        num_bottleneck_layers=4,
-        frequency_scaling=True,
-        heads=4,
-        normalization=True,
-        bottleneck_channels=32 * 2,
-        pre_normalize_2d_to_1d=True,
-        pre_normalize_downsampling_encoder=True,
-        hop=128 * 4,
-        data_channels=2,
-        min_res_dropout=16,
-        dropout_rate=0,
-        natten_kernel_size=3,
-    ):
-        super().__init__()
-        layers_list = layers_list_encoder
-        attention_list = attention_list_encoder
-        self.layers_list = layers_list_encoder
-        self.multipliers_list = multipliers_list
-        self.min_res_dropout = min_res_dropout
-        input_channels = base_channels * multipliers_list[0]
-        self.gain = FreqGain(freq_dim=hop * 2)
-        self.frequency_scaling = frequency_scaling
-        self.pre_normalize_2d_to_1d = pre_normalize_2d_to_1d
-        self.conv_inp = LocalAttention2d(
-            data_channels,
-            input_channels,
-            kernel_size=natten_kernel_size,
-            heads=heads,
-        )
-        self.freq_dim = (hop * 2) // (4 ** freq_downsample_list.count(1))
-        self.freq_dim = self.freq_dim // (2 ** freq_downsample_list.count(0))
-        down_layers = []
-        for i, (num_layers, multiplier) in enumerate(
-            zip(layers_list, multipliers_list)
-        ):
-            output_channels = base_channels * multiplier
-            for num in range(num_layers):
-                down_layers.append(
-                    ResBlockLocalAttention(
-                        input_channels,
-                        output_channels,
-                        normalize=normalization,
-                        attention=attention_list[i] == 1,
-                        heads=heads,
-                        use_2d=True,
-                        min_res_dropout=min_res_dropout,
-                        dropout_rate=dropout_rate,
-                        kernel_size=natten_kernel_size,
-                    )
-                )
-                input_channels = output_channels
-            if i != (len(layers_list) - 1):
-                if freq_downsample_list[i] == 1:
-                    down_layers.append(
-                        DownsampleFreqLocalAttention(
-                            input_channels,
-                            normalize=pre_normalize_downsampling_encoder,
-                            heads=heads,
-                            kernel_size=5,
-                        )
-                    )
-                else:
-                    down_layers.append(
-                        DownsampleLocalAttention(
-                            input_channels,
-                            use_2d=True,
-                            normalize=pre_normalize_downsampling_encoder,
-                            heads=heads,
-                            kernel_size=natten_kernel_size,
-                        )
-                    )
-
-        if pre_normalize_2d_to_1d:
-            self.prenorm_1d_to_2d = nn.GroupNorm(
-                min(input_channels // 4, 32), input_channels
-            )
-        bottleneck_layers = []
-        output_channels = bottleneck_base_channels
-        bottleneck_layers.append(
-            ChannelLinear1d(input_channels * self.freq_dim, output_channels)
-        )
-        for i in range(num_bottleneck_layers):
-            bottleneck_layers.append(
-                ResBlockLocalAttention(
-                    output_channels,
-                    output_channels,
-                    normalize=normalization,
-                    use_2d=False,
-                    heads=heads,
-                    min_res_dropout=min_res_dropout,
-                    dropout_rate=dropout_rate,
-                    kernel_size=natten_kernel_size,
-                )
-            )
-        self.bottleneck_layers = nn.ModuleList(bottleneck_layers)
-        self.norm_out = nn.GroupNorm(min(output_channels // 4, 32), output_channels)
-        self.activation_out = nn.SiLU()
-        self.conv_out = ChannelLinear1d(output_channels, bottleneck_channels)
-        self.activation_bottleneck = nn.Tanh()
-        self.down_layers = nn.ModuleList(down_layers)
-
-    def encode_features(self, x):
-        x = self.conv_inp(x)
-        if self.frequency_scaling:
-            x = self.gain(x)
-        k = 0
-        for i, num_layers in enumerate(self.layers_list):
-            for num in range(num_layers):
-                x = self.down_layers[k](x)
-                k = k + 1
-            if i != (len(self.layers_list) - 1):
-                x = self.down_layers[k](x)
-                k = k + 1
-        if self.pre_normalize_2d_to_1d:
-            x = self.prenorm_1d_to_2d(x)
-        x = x.reshape(x.size(0), x.size(1) * x.size(2), x.size(3))
-        return x
-
-    def project_features(self, x):
-        for layer in self.bottleneck_layers:
-            x = layer(x)
-        hidden = x
-        continuous = self.hidden_to_latent(hidden)
-        return continuous, hidden
-
-    def hidden_to_latent(self, hidden):
-        x = hidden
-        x = self.norm_out(x)
-        x = self.activation_out(x)
-        x = self.conv_out(x)
-        return self.activation_bottleneck(x)
-
-    def forward(self, x, extract_features=False, return_hidden=False):
-        x = self.encode_features(x)
-        if extract_features:
-            return x
-        continuous, hidden = self.project_features(x)
-        if return_hidden:
-            return continuous, hidden
-        return continuous
-
-
-class DecoderLocalAttention(nn.Module):
-    def __init__(
-        self,
-        base_channels=64,
-        layers_list=[2, 2, 2, 2, 2],
-        multipliers_list=[1, 2, 4, 4, 4],
-        attention_list=[0, 0, 1, 1, 1],
-        freq_downsample_list=[1, 0, 0, 0],
-        layers_list_encoder=[1, 1, 1, 1, 1],
-        attention_list_encoder=[0, 0, 1, 1, 1],
-        bottleneck_base_channels=512,
-        num_bottleneck_layers=4,
-        heads=4,
-        cond_channels=256,
-        normalization=True,
-        bottleneck_channels=64,
-        hop=512,
-        dropout_rate=0,
-        min_res_dropout=16,
-        natten_kernel_size=3,
-    ):
-        super().__init__()
-        del layers_list, attention_list, cond_channels
-        layers_list = layers_list_encoder
-        attention_list = attention_list_encoder
-        self.layers_list = layers_list_encoder
-        self.multipliers_list = multipliers_list
-        input_channels = base_channels * multipliers_list[-1]
-        output_channels = bottleneck_base_channels
-        self.conv_inp = ChannelLinear1d(bottleneck_channels, output_channels)
-        self.freq_dim = (hop * 2) // (4 ** freq_downsample_list.count(1))
-        self.freq_dim = self.freq_dim // (2 ** freq_downsample_list.count(0))
-        bottleneck_layers = []
-        for i in range(num_bottleneck_layers):
-            bottleneck_layers.append(
-                ResBlockLocalAttention(
-                    output_channels,
-                    output_channels,
-                    normalize=normalization,
-                    use_2d=False,
-                    heads=heads,
-                    dropout_rate=dropout_rate,
-                    min_res_dropout=min_res_dropout,
-                    kernel_size=natten_kernel_size,
-                )
-            )
-        self.conv_out_bottleneck = ChannelLinear1d(
-            output_channels,
-            input_channels * self.freq_dim,
-        )
-        self.bottleneck_layers = nn.ModuleList(bottleneck_layers)
-        multipliers_list_upsampling = (
-            list(reversed(multipliers_list))[1:] + list(reversed(multipliers_list))[:1]
-        )
-        freq_upsample_list = list(reversed(freq_downsample_list))
-        up_layers = []
-        for i, (num_layers, multiplier) in enumerate(
-            zip(reversed(layers_list), multipliers_list_upsampling)
-        ):
-            for num in range(num_layers):
-                up_layers.append(
-                    ResBlockLocalAttention(
-                        input_channels,
-                        input_channels,
-                        normalize=normalization,
-                        attention=list(reversed(attention_list))[i] == 1,
-                        heads=heads,
-                        use_2d=True,
-                        min_res_dropout=min_res_dropout,
-                        dropout_rate=dropout_rate,
-                        kernel_size=natten_kernel_size,
-                    )
-                )
-            if i != (len(layers_list) - 1):
-                output_channels = base_channels * multiplier
-                if freq_upsample_list[i] == 1:
-                    up_layers.append(
-                        UpsampleFreqLocalAttention(
-                            input_channels,
-                            output_channels,
-                            heads=heads,
-                            kernel_size=5,
-                        )
-                    )
-                else:
-                    up_layers.append(
-                        UpsampleLocalAttention(
-                            input_channels,
-                            output_channels,
-                            use_2d=True,
-                            heads=heads,
-                            kernel_size=natten_kernel_size,
-                        )
-                    )
-                input_channels = output_channels
-        self.up_layers = nn.ModuleList(up_layers)
-
-    def forward(self, x):
-        x = self.conv_inp(x)
-        for layer in self.bottleneck_layers:
-            x = layer(x)
-        x = self.conv_out_bottleneck(x)
-        x_ls = torch.chunk(x.unsqueeze(-2), self.freq_dim, -3)
-        x = torch.cat(x_ls, -2)
-        k = 0
-        pyramid_list = []
-        for i, num_layers in enumerate(reversed(self.layers_list)):
-            for num in range(num_layers):
-                x = self.up_layers[k](x)
-                k = k + 1
-            pyramid_list.append(x)
-            if i != (len(self.layers_list) - 1):
-                x = self.up_layers[k](x)
-                k = k + 1
-        pyramid_list = pyramid_list[::-1]
-        return pyramid_list
-
-
-class Music2Latent_localattention(Music2Latent):
-    """Music2Latent variant with convolutional operators replaced by NATTEN local attention."""
-
-    def __init__(
-        self,
-        audio_processor: AudioProcessor,
-        sample_rate: 44100,
-        base_channels=64,
-        layers_list=[2, 2, 2, 2, 2],
-        multipliers_list=[1, 2, 4, 4, 4],
-        attention_list=[0, 0, 1, 1, 1],
-        freq_downsample_list=[1, 0, 0, 0],
-        layers_list_encoder=[1, 1, 1, 1, 1],
-        attention_list_encoder=[0, 0, 1, 1, 1],
-        bottleneck_base_channels=512,
-        num_bottleneck_layers=4,
-        frequency_scaling=True,
-        heads=4,
-        cond_channels=256,
-        use_fourier=False,
-        fourier_scale=0.2,
-        normalization=True,
-        dropout_rate=0.0,
-        min_res_dropout=16,
-        init_as_zero=True,
-        bottleneck_channels=32 * 2,
-        pre_normalize_2d_to_1d=True,
-        pre_normalize_downsampling_encoder=True,
-        hop=128 * 4,
-        data_channels=2,
-        sigma_max=80.0,
-        sigma_min=0.002,
-        sigma_data=0.5,
-        mixed_precision=True,
-        rho=7.0,
-        max_waveform_length_encode=44100 * 60,
-        max_batch_size_encode=1,
-        max_waveform_length_decode=44100 * 60,
-        max_batch_size_decode=1,
-        quantizer_num_quantizers=0,
-        quantizer_codebook_size=1024,
-        quantizer_codebook_dim=8,
-        quantizer_dropout=0.0,
-        quantizer_decay=0.8,
-        quantizer_kmeans_init=True,
-        quantizer_kmeans_iters=10,
-        quantizer_threshold_ema_dead_code=2,
-        natten_kernel_size=3,
-        **kwargs
-    ):
-        nn.Module.__init__(self)
-        self.sigma_max = sigma_max
-        self.frequency_scaling = frequency_scaling
-        self.layers_list = layers_list
-        self.multipliers_list = multipliers_list
-        self.sample_rate = sample_rate
-        input_channels = base_channels * multipliers_list[0]
-        self.hop = hop
-        self.freq_downsample_list = freq_downsample_list
-        self.layers_list_encoder = layers_list_encoder
-        self.attention_list_encoder = attention_list_encoder
-        self.bottleneck_base_channels = bottleneck_base_channels
-        self.num_bottleneck_layers = num_bottleneck_layers
-        self.heads = heads
-        self.cond_channels = cond_channels
-        self.normalization = normalization
-        self.dropout_rate = dropout_rate
-        self.min_res_dropout = min_res_dropout
-        self.init_as_zero = init_as_zero
-        self.bottleneck_channels = bottleneck_channels
-        self.pre_normalize_2d_to_1d = pre_normalize_2d_to_1d
-        self.pre_normalize_downsampling_encoder = pre_normalize_downsampling_encoder
-        self.mixed_precision = mixed_precision
-        self.data_channels = data_channels
-        self.quantizer_num_quantizers = int(quantizer_num_quantizers)
-        self.sigma_min = sigma_min
-        self.sigma_data = sigma_data
-        self.rho = rho
-        self.audio_processor = audio_processor
-        self.natten_kernel_size = natten_kernel_size
-        self.encoder = EncoderLocalAttention(
-            base_channels=base_channels,
-            layers_list_encoder=layers_list_encoder,
-            multipliers_list=multipliers_list,
-            attention_list_encoder=attention_list_encoder,
-            freq_downsample_list=freq_downsample_list,
-            bottleneck_base_channels=bottleneck_base_channels,
-            num_bottleneck_layers=num_bottleneck_layers,
-            frequency_scaling=frequency_scaling,
-            heads=heads,
-            normalization=normalization,
-            bottleneck_channels=bottleneck_channels,
-            pre_normalize_2d_to_1d=pre_normalize_2d_to_1d,
-            pre_normalize_downsampling_encoder=pre_normalize_downsampling_encoder,
-            hop=hop,
-            data_channels=data_channels,
-            min_res_dropout=min_res_dropout,
-            dropout_rate=dropout_rate,
-            natten_kernel_size=natten_kernel_size,
-        )
-        self.decoder = DecoderLocalAttention(
-            base_channels=base_channels,
-            layers_list=layers_list,
-            multipliers_list=multipliers_list,
-            attention_list=attention_list,
-            freq_downsample_list=freq_downsample_list,
-            layers_list_encoder=layers_list_encoder,
-            attention_list_encoder=attention_list_encoder,
-            bottleneck_base_channels=bottleneck_base_channels,
-            num_bottleneck_layers=num_bottleneck_layers,
-            heads=heads,
-            cond_channels=cond_channels,
-            normalization=normalization,
-            bottleneck_channels=bottleneck_channels,
-            hop=hop,
-            dropout_rate=dropout_rate,
-            min_res_dropout=min_res_dropout,
-            natten_kernel_size=natten_kernel_size,
-        )
-        if self.quantizer_num_quantizers > 0:
-            self.quantizer = ResidualVectorQuantize(
-                input_dim=bottleneck_base_channels,
-                n_codebooks=self.quantizer_num_quantizers,
-                codebook_size=quantizer_codebook_size,
-                codebook_dim=quantizer_codebook_dim,
-                quantizer_dropout=quantizer_dropout,
-                decay=quantizer_decay,
-                kmeans_init=quantizer_kmeans_init,
-                kmeans_iters=quantizer_kmeans_iters,
-                threshold_ema_dead_code=quantizer_threshold_ema_dead_code,
-            )
-        else:
-            self.quantizer = None
-        if use_fourier:
-            self.emb = GaussianFourierProjection(
-                embedding_size=cond_channels, scale=fourier_scale
-            )
-        else:
-            self.emb = PositionalEmbedding(embedding_size=cond_channels)
-        self.emb_proj = nn.Sequential(
-            nn.Linear(cond_channels, cond_channels),
-            nn.SiLU(),
-            nn.Linear(cond_channels, cond_channels),
-            nn.SiLU(),
-        )
-        self.scale_inp = nn.Sequential(
-            nn.Linear(cond_channels, cond_channels),
-            nn.SiLU(),
-            nn.Linear(cond_channels, cond_channels),
-            nn.SiLU(),
-            (
-                zero_init(nn.Linear(cond_channels, hop * 2))
-                if init_as_zero
-                else nn.Linear(cond_channels, hop * 2)
-            ),
-        )
-        self.scale_out = nn.Sequential(
-            nn.Linear(cond_channels, cond_channels),
-            nn.SiLU(),
-            nn.Linear(cond_channels, cond_channels),
-            nn.SiLU(),
-            (
-                zero_init(nn.Linear(cond_channels, hop * 2))
-                if init_as_zero
-                else nn.Linear(cond_channels, hop * 2)
-            ),
-        )
-        self.conv_inp = LocalAttention2d(
-            data_channels,
-            input_channels,
-            kernel_size=natten_kernel_size,
-            heads=heads,
-        )
-        down_layers = []
-        for i, (num_layers, multiplier) in enumerate(
-            zip(layers_list, multipliers_list)
-        ):
-            output_channels = base_channels * multiplier
-            for num in range(num_layers):
-                down_layers.append(ChannelLinear2d(output_channels, output_channels))
-                down_layers.append(
-                    ResBlockLocalAttention(
-                        output_channels,
-                        output_channels,
-                        cond_channels,
-                        normalize=normalization,
-                        attention=attention_list[i] == 1,
-                        heads=heads,
-                        use_2d=True,
-                        dropout_rate=dropout_rate,
-                        min_res_dropout=min_res_dropout,
-                        kernel_size=natten_kernel_size,
-                    )
-                )
-                input_channels = output_channels
-            if i != (len(layers_list) - 1):
-                output_channels = base_channels * multipliers_list[i + 1]
-                if freq_downsample_list[i] == 1:
-                    down_layers.append(
-                        DownsampleFreqLocalAttention(
-                            input_channels,
-                            output_channels,
-                            heads=heads,
-                            kernel_size=5,
-                        )
-                    )
-                else:
-                    down_layers.append(
-                        DownsampleLocalAttention(
-                            input_channels,
-                            output_channels,
-                            use_2d=True,
-                            heads=heads,
-                            kernel_size=natten_kernel_size,
-                        )
-                    )
-        multipliers_list_upsampling = (
-            list(reversed(multipliers_list))[1:] + list(reversed(multipliers_list))[:1]
-        )
-        freq_upsample_list = list(reversed(freq_downsample_list))
-        up_layers = []
-        for i, (num_layers, multiplier) in enumerate(
-            zip(reversed(layers_list), multipliers_list_upsampling)
-        ):
-            for num in range(num_layers):
-                up_layers.append(ChannelLinear2d(input_channels, input_channels))
-                up_layers.append(
-                    ResBlockLocalAttention(
-                        input_channels,
-                        input_channels,
-                        cond_channels,
-                        normalize=normalization,
-                        attention=list(reversed(attention_list))[i] == 1,
-                        heads=heads,
-                        use_2d=True,
-                        dropout_rate=dropout_rate,
-                        min_res_dropout=min_res_dropout,
-                        kernel_size=natten_kernel_size,
-                    )
-                )
-            if i != (len(layers_list) - 1):
-                output_channels = base_channels * multiplier
-                if freq_upsample_list[i] == 1:
-                    up_layers.append(
-                        UpsampleFreqLocalAttention(
-                            input_channels,
-                            output_channels,
-                            heads=heads,
-                            kernel_size=5,
-                        )
-                    )
-                else:
-                    up_layers.append(
-                        UpsampleLocalAttention(
-                            input_channels,
-                            output_channels,
-                            use_2d=True,
-                            heads=heads,
-                            kernel_size=natten_kernel_size,
-                        )
-                    )
-                input_channels = output_channels
-        self.conv_decoded = ChannelLinear2d(input_channels, input_channels)
-        self.norm_out = nn.GroupNorm(min(input_channels // 4, 32), input_channels)
-        self.activation_out = nn.SiLU()
-        self.conv_out = ChannelLinear2d(input_channels, data_channels, zero=init_as_zero)
-        self.down_layers = nn.ModuleList(down_layers)
-        self.up_layers = nn.ModuleList(up_layers)
-        self.max_waveform_length_encode = max_waveform_length_encode
-        self.max_batch_size_encode = max_batch_size_encode
-        self.max_waveform_length_decode = max_waveform_length_decode
-        self.max_batch_size_decode = max_batch_size_decode

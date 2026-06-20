@@ -1,12 +1,12 @@
 # @package _global_
 
-project_name: music2latent-localattention
+project_name: mossland-codec
 checkpoint_monitor: loss/total
-tags: ["music2latent", "localattention", "same-temporal"]
+tags: ["audioCodec", "mossland-codec", "mossland-rvq", "0p5b", "stereo", "multi-task"]
 seed: 42
-resume_from_ckpt: null
+resume_from_ckpt: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-19_17-50-58/checkpoints/last.ckpt
 pretrain_ckpt_path: null
-checkpoint_every_n_train_steps: 100
+checkpoint_every_n_train_steps: 500
 
 trainer:
   devices: [0, 1, 2, 3, 4, 5, 6, 7]
@@ -14,41 +14,56 @@ trainer:
   precision: bf16-mixed
   max_steps: 800000
   max_epochs: 10000000
-  accumulate_grad_batches: 1
+  # accumulate_grad_batches: 16
   gradient_clip_val: null
   gradient_clip_algorithm: null
-  log_every_n_steps: 1
+  log_every_n_steps: 10
   num_sanity_val_steps: 0
   check_val_every_n_epoch: null
 
 data:
   _target_: scripts.data.datasets.Experiment_Dataset
   dataset:
-    _target_: scripts.music2latent.data.Music2LatentOfficialPTDataset
-    root: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/music2latent_local_2s_pt
-    index_file: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/music2latent_local_2s_pt/files.list
-    key: audio
+    _target_: scripts.mossland_codec.tasks.MosslandTaskPTDataset
+    root: ${paths.root_dir}/tmp/mossland_codec_debug_pt
+    index_file: ${paths.root_dir}/tmp/mossland_codec_debug_pt/files.list
     length: 160000
+    strict: false
   pin_memory: true
   val_split: null
-  train_batch_size: 16
+  train_batch_size: 8
   val_batch_size: 1
   num_workers: 16
   prefetch_factor: 2
 
+
 model:
-  _target_: scripts.music2latent.models.Music2Latent_sametemporal
+  _target_: scripts.mossland_codec.models.MosslandCodec
   sample_rate: 44100
-  base_channels: 64
-  data_channels: 2
+  base_channels: 192
+  data_channels: 4
   hop: 512
   mixed_precision: true
   bottleneck_channels: 64
-  bottleneck_base_channels: 512
+  bottleneck_base_channels: 1536
   num_bottleneck_layers: 4
-  quantizer_num_quantizers: 0
-  heads: 4
-  cond_channels: 256
+  quantizer_num_quantizers: 32
+  quantizer_codebook_size: 1024
+  quantizer_codebook_dim: null
+  quantizer_dropout: 1.0
+  quantizer_decay: 0.8
+  quantizer_kmeans_init: true
+  quantizer_kmeans_iters: 10
+  quantizer_threshold_ema_dead_code: 2
+  task_names:
+    - reconstruct
+    - separate_vocals
+    - separate_accompaniment
+    - super_resolution
+    - mono_to_stereo
+  task_embedding_init_std: 0.02
+  heads: 8
+  cond_channels: 768
   use_fourier: false
   fourier_scale: 0.2
   normalization: true
@@ -68,14 +83,8 @@ model:
   frequency_scaling: true
   pre_normalize_2d_to_1d: true
   pre_normalize_downsampling_encoder: true
-  same_transformer_depth: 1
-  same_dim_heads: 64
-  same_sliding_window: [1, 1]
-  same_ff_mult: 1
-  same_differential: false
-  same_dyt: false
   audio_processor:
-    _target_: scripts.music2latent.audio.AudioProcessor
+    _target_: scripts.mossland_codec.audio.AudioProcessor
     alpha_rescale: 0.65
     beta_rescale: 0.34
     hop_size: 512
@@ -83,22 +92,23 @@ model:
     center_pad: false
 
 wrapper:
-  _target_: scripts.music2latent.wrapper.Music2LatnetTrainingWrapper
+  _target_: scripts.mossland_codec.wrapper.MosslandCodecTrainingWrapper
   use_ema: true
+  ema_beta: 0.9999
   learning_rate: 1e-4
   weight_decay: 0.0
   optimizer_name: radam
   lr_schedule: cosine_decay
-  lr_warmup_steps: 10
+  lr_warmup_steps: 100
   lr_schedule_total_steps: 800000
   final_learning_rate: 1e-6
   rvq_commitment_weight: 0.0
   rvq_codebook_weight: 0.0
   rvq_hidden_recon_weight: 0.0
-  rvq_latent_train_prob: 0.0
-  rvq_detach_encoder: true
+  rvq_latent_train_prob: 0.25
+  rvq_detach_encoder: false
   train_n_quantizers: null
-  train_n_quantizers_choices: null
+  train_n_quantizers_choices: [8, 16, 32]
   consistency_step: 0.1
   consistency_step_schedule: exponential
   consistency_step_total_steps: 800000
@@ -108,17 +118,19 @@ wrapper:
   lognormal_std: 2.0
   consistency_loss_delta: 0.00054
   consistency_min_sigma_delta: 0.001
+  index_data_every_step: null
   fail_on_nonfinite: true
   fail_on_nonfinite_grad: false
 
 callbacks:
   demo_callback:
-    _target_: scripts.music2latent.wrapper.Music2LatnetTrainingCallback
+    _target_: scripts.mossland_codec.wrapper.MosslandCodecTrainingCallback
     demo_dir: ${paths.output_dir}/demos
-    demo_num: 4
+    demo_num: 2
     demo_every: 100
     sample_rate: 44100
-    demo_n_quantizers: null
-    demo_n_quantizers_choices: null
+    demo_n_quantizers_choices: [8, 16, 32]
     denoising_steps: 1
     demo_seed: 1234
+    silence_seconds: 0.25
+    use_ema: true

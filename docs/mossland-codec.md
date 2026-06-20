@@ -1,35 +1,85 @@
 # Mossland Codec 说明
 
-本文件记录 `scripts/mossland-codec` 的当前架构、训练入口和 separation 数据准备方式。
+本文件记录当前 `scripts/mossland_codec` 训练包、debug `.pt` 数据入口和 separation 数据准备方式。历史 hyphen 实现已经归档到 `scripts/mossland_codec_old/`；除非要复查旧 checkpoint/eval，不要把它当作当前训练包。
 
-## 设计决策
+## 当前包边界
 
-- `scripts/codicodec/` 和 `scripts/configs/experiment/codicodec.yaml` 保留，作为独立 CoDiCodec 参考实现。
-- `scripts/mossland-codec/` 是 Mossland codec 唯一实现目录，使用 hyphen 路径，不再创建 `scripts/mossland_codec/`。
-- `scripts/mossland-codec/` 不 import `scripts.codicodec`。需要的模型、音频表示、训练工具和推理辅助代码已经集成在本目录。
-- `scripts/mossland-codec/hparams.py` 和 `scripts/mossland-codec/hparams_inference.py` 已删除。模型、音频表示、噪声调度和推理默认值不再从全局 hparams 模块读取，统一通过 `MosslandCodecTransformer(...)` 构造参数、`EncoderDecoder(model_kwargs=...)` 或 Hydra `model:` 配置显式传入。
-- 模型类是 `scripts.mossland-codec.models.MosslandCodecTransformer`。decoder conditioning 只使用 sigma embedding 加上任务名 `task_embedding`；模型也负责 `prepare_audio_batch()` 和 `generate_waveform()` 这类与模型输入长度、声道和推理路径强相关的逻辑。
-- codec 与 no-latent A2A 模型的 `task_embedding` 默认使用 `normal_(0, 0.02)` 初始化，不使用全 0 初始化；A2A 配置显式设置 `model.task_embedding_init_std: 0.02`。
-- wrapper 类是 `scripts.mossland-codec.wrapper.MosslandCodecTrainingWrapper`，负责消费已经构造好的任务 payload、计算 consistency loss、维护 EMA、optimizer/scheduler 和 demo 输出；不再抽样任务或构造 `src/target`。
-- demo callback 在生成 demo 前后都会执行 `gc.collect()`、`torch.cuda.synchronize()` 和 `torch.cuda.empty_cache()`，避免 demo 推理与训练 step 的缓存显存重叠导致 OOM；每个样本只保存顺序拼接 mp3，raw model 和 EMA model 各一份。当前 `causal_rvq` 配置内容为 `src -> target -> quantized8 -> quantized16 -> quantized32 -> continuous`；旧 `packed_rvq` checkpoint 仍可用旧的 16/32/64/128 码率。
-- 不集成完整 `scripts.music2latent`；只保留当前 wrapper 需要的 finite check、grad norm、EMA 更新、导出和 pseudo-Huber loss。
+- 当前包目录是 `scripts/mossland_codec/`，目录名使用 underscore。
+- 旧实现已移动到 `scripts/mossland_codec_old/`，包含旧 eval benchmark、旧 inference、旧 Transformer/causal RVQ 代码。
+- 新包不 import `scripts.codicodec`，也不从旧 hyphen 包搬 eval 或无关实验栈。
+- 当前公开模型类是 `scripts.mossland_codec.models.MosslandCodec`。
+- 当前 wrapper 是 `scripts.mossland_codec.wrapper.MosslandCodecTrainingWrapper`。
+- wrapper 只消费标准任务 payload：`{"src": Tensor[C,T], "target": Tensor[C,T], "task_id": str}`。
+- 模型有显式 task embedding。`task_names` 默认来自 `scripts.mossland_codec.tasks.TASK_NAMES`，正式/debug 配置也显式写出 5 个主任务；forward 中把 `sigma_embedding + task_embedding(task_idx)` 送入 `emb_proj` 得到 denoiser 的 `time_emb`，wrapper 在 consistency loss 和 demo decode 中都会传入 batch 内对应的 `task_id`。
+- demo callback 保存顺序拼接 mp3：`src -> target -> discrete8 -> discrete16 -> discrete32 -> continuous`，raw/EMA 各一份。callback 支持 `demo_start_step`，用于推迟第一次 demo；debug 配置默认 step 100 才开始保存 demo。
 
-## 任务
+## 任务与数据
 
-`scripts.mossland-codec.tasks.TASK_NAMES` 当前包含：
+`scripts.mossland_codec.tasks.TASK_NAMES` 当前默认训练任务为：
 
 - `reconstruct`
 - `separate_vocals`
-- `separate_drums`
-- `separate_bass`
-- `separate_other`
 - `separate_accompaniment`
 - `super_resolution`
 - `mono_to_stereo`
 
-`MosslandTaskDataset` 是唯一的训练任务抽样入口，把普通音频或 prepared stem payload 适配为 `src/target/task_id`。`MosslandTaskBatch` 负责标准 payload 的 `to_payload/from_payload` 转换，wrapper 只接受这个 schema。audio super-resolution 的具体 downsample rate 和 mono/stereo channel mode 不再作为额外条件传给模型。
+`MosslandTaskDataset` 在线把普通 audio payload 或 prepared stem payload 适配成 `src/target/task_id`。对 `PreparedSeparationDataset`，它会按任务只读取需要的 stem：非分离任务只读 mixture，`separate_vocals` 读 mixture/vocals，`separate_accompaniment` 读 mixture/accompaniment。
 
-MUSDB18-HQ 四轨训练使用 `Musdb18HqSeparationDataset` 直接读取解压后的 wav stem 树：`train/test/<track>/{mixture,vocals,drums,bass,other}.wav`。当前多任务 A2A 配置是 `scripts/configs/experiment/codicodec-paper-repro-a2a.yaml`，命令 `python -m scripts.train experiment=codicodec-paper-repro-a2a`：`separate_vocals`、`separate_drums`、`separate_bass`、`separate_other` 路由到 MUSDB18-HQ；`super_resolution` 和 `mono_to_stereo` 路由到原始 `/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER` 音频。A2A 模型复用 Mossland STFT representation、frontend、`Transformer_Diffusion`、task embedding 和 consistency loss；source 侧现在先经过非压缩 encoder，`num_latents` 自动等于 encoder token 数 `data_length`，`bottleneck_channels` 必须等于 `dim`，`num_more_latents=0`，`use_fsq=false`，不使用 learned latent query 抽取信息，也不把 source 频谱直接 concat 到 decoder input。decoder 通过 source encoder tokens 和 decoder-aligned multiscale features 做 conditioning；这些 features 必须由 encoded source tokens 经过 `frontend_pre_decoder_up(..., skip_output_layer=True)` 生成，不能直接复用 `frontend_encoder_down` 的 raw features，否则真实下采样 frontend 会在 `frontend_decoder_down.add_feature()` 处发生空间维度错配。`MosslandTaskRoutedDataset` 返回固定 `info` schema，避免混合 MUSDB 与原始音频数据集时因异构 metadata key 导致 PyTorch default collate 抛 `KeyError`。
+`MosslandTaskPTDataset` 是 debug 入口，直接读取已经固化好的 task `.pt`。每个 `.pt` 至少包含：
+
+```python
+{
+    "src": Tensor[C, T],
+    "target": Tensor[C, T],
+    "task_id": "reconstruct" | "separate_vocals" | "separate_accompaniment" | "super_resolution" | "mono_to_stereo",
+}
+```
+
+可选 metadata 会放在 `info`、`source_path`、`relpath`、`sample_start`、`sample_end` 等字段里。DataLoader collate 后仍由 `MosslandTaskBatch.from_payload()` 还原给 wrapper。
+
+## Debug `.pt` 数据
+
+当前 debug 数据生成命令：
+
+```sh
+python -m scripts.mossland_codec.prepare_debug_pt --num-samples 10 --overwrite
+```
+
+默认读取本机 prepared stem 根：
+
+```text
+/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER_SEPERATION_NEW
+```
+
+默认写入：
+
+```text
+tmp/mossland_codec_debug_pt/
+```
+
+输出包括 `000000_<task>.pt`、`files.list` 和 `index.jsonl`。任务按 `TASK_NAMES` 轮转，因此 10 条样本会覆盖 5 个任务两轮。当前已实际生成 10 条 2 秒 stereo debug 样本，`files.list` 可直接被 `mossland_codec_debug.yaml` 读取。
+
+## 历史旧实现记录
+
+以下训练/推理记录只描述已归档的旧 `scripts/mossland_codec_old/` 实现。当前新训练包以本文开头的 `scripts/mossland_codec/`、`MosslandCodec`、`MosslandTaskPTDataset` 和 `mossland_codec_debug.yaml` 说明为准。
+
+## 历史训练入口
+
+正式 0.5B stereo RVQ 多任务入口：
+
+```sh
+python -m scripts.train experiment=mossland-codec
+```
+
+该配置仍名为 `mossland-codec.yaml`，但 Python targets 均指向 underscore 包 `scripts.mossland_codec.*`。模型为 `data_channels=4`、`base_channels=192`、`bottleneck_base_channels=1536`、`bottleneck_channels=64`，32 个 1024-size RVQ codebook，训练/demo 码率 `[8,16,32]`。`bottleneck_channels` 是连续 latent 维度/压缩率边界，必须保持 64；扩 0.5B 参数量只调主干/hidden 宽度。wrapper 默认 `rvq_latent_train_prob=0.25`、`rvq_detach_encoder=false`，即 batch 内一部分样本用 discrete latent 参与 denoiser 和 encoder hidden 调整。
+
+debug 小模型入口：
+
+```sh
+python -m scripts.train experiment=mossland_codec_debug
+```
+
+`mossland_codec_debug.yaml` 参考 `music2latent.yaml` 的小模型/pt-data 口径：`MosslandTaskPTDataset` 读 `tmp/mossland_codec_debug_pt/files.list`，模型缩到 `base_channels=64`、`bottleneck_channels=64`、`cond_channels=256`、`heads=4`，仍保持 stereo `data_channels=4`、32 层 RVQ 和 `[8,16,32]` 动态码率。demo 默认 `demo_num=1`、`demo_every=100`、`demo_start_step=100`、`use_ema=false`，避免第 1 步就进入 `encode/decode/torchaudio.save` 的重 demo 路径。
 
 ## Separation 预处理
 
@@ -137,7 +187,7 @@ python scripts/train.py experiment=mossland-codec
 
 `scripts/configs/experiment/mossland-codec.yaml` 的 `model:` 节是模型超参数的主入口，包含 `sample_rate`、`hop`、`fac`、`spec_length`、`sigma_min`、`sigma_max`、`num_latents`、frontend 层数等原先容易散落在 hparams 文件中的参数。训练 wrapper 只从传入的 `model` 实例读取需要保持一致的音频和噪声调度参数。
 
-当前主训练配置使用 causal RVQ tokenizer 口径：48 kHz stereo、`sample_size=96000`、`hop=768`、`fac=2`、`spec_length=62`，因此 `prepare_audio_batch()` 的 2 秒窗口正好是 `96000` samples。frontend 下采样列表为 `[1,1,1]`，只沿频率下采样，实测 `data_length=744`、`freq_dim=12`、`time_dim=62`、`downsample_ratio=64`。bottleneck 为 `bottleneck_type=causal_rvq`、`bottleneck_channels=32`、`num_latents=25`：encoder 按时长连续输出有序 continuous token，2 秒为 `[B,50,32]`，4 秒为 `[B,100,32]`，即 `32-d @ 25 Hz`。
+旧实现当时的主训练配置使用 causal RVQ tokenizer 口径：48 kHz stereo、`sample_size=96000`、`hop=768`、`fac=2`、`spec_length=62`，因此 `prepare_audio_batch()` 的 2 秒窗口正好是 `96000` samples。frontend 下采样列表为 `[1,1,1]`，只沿频率下采样，实测 `data_length=744`、`freq_dim=12`、`time_dim=62`、`downsample_ratio=64`。bottleneck 为 `bottleneck_type=causal_rvq`、`bottleneck_channels=32`、`num_latents=25`：encoder 按时长连续输出有序 continuous token，2 秒为 `[B,50,32]`、4 秒为 `[B,100,32]`，即 `32-d @ 25 Hz`。
 
 `causal_rvq` 的 encoder 不再使用 CoDiCodec 原始 learned summary query 产生 chunk 内无时序关系的 128 个 summary embedding；它把 frontend `[freq,time]` token 聚合为时间序列，经过参考 `scripts/MOSS_Audio_Tokenizer` local-causal SDPA 思路实现的 `LocalCausalSelfAttention/CausalLatentEncoder`，再输出有序 latent token。编码侧不再把长音频按 `spec_length` 切成互不相见的 chunk；注意力窗口仍是有限的，由 `causal_rvq_context` 决定。当前配置 `causal_rvq_context=620` 作用在 frontend pooling 后约 62Hz 的时间步上，约等于 10 秒历史；`LocalCausalSelfAttention` 对长序列按 query chunk 分块构造局部 causal mask，避免全长 attention mask 占用随音频平方增长。离散分支为 lucidrains EMA RVQ：`rvq_num_quantizers=32`、`rvq_codebook_size=1024`、`rvq_codebook_dim=null`，codes 形如 `[B,Q,T]`，2 秒窗口全量为 `[B,32,50]`，适合 delay pattern LLM。主 consistency 训练仍只用 continuous latent；RVQ loss 权重默认全 0，RVQ 只作为 detached EMA codebook assignment/update 旁路。
 
@@ -145,7 +195,7 @@ python scripts/train.py experiment=mossland-codec
 
 `scripts/mossland-codec/transformer_layers.py` 的 attention 通过 PyTorch `scaled_dot_product_attention` 执行。CUDA bf16/fp16 且无显式 mask 时会用 `torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION)` 强制 flash backend；CPU、不支持 flash 或显式 tensor mask 时回退普通 SDPA。decoder 原先的 `[2*block, 2*block]` float block mask 会让 SDPA 退回非 flash，现在改为 `block_causal_attention_mask(block_size)` 轻量 spec，`MultiHeadAttention` 把它拆成两次无 mask attention：左半只 attend 左半，右半 attend 全部，语义等价但可走 flash。
 
-当前 `scripts/configs/experiment/mossland-codec.yaml` 已直接使用 `PreparedSeparationDataset` 指向：
+旧实现当时的 `scripts/configs/experiment/mossland-codec.yaml` 直接使用 `PreparedSeparationDataset` 指向：
 
 ```text
 /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER_SEPERATION_NEW
@@ -155,7 +205,7 @@ python scripts/train.py experiment=mossland-codec
 
 `super_resolution` 的 `low_sample_rate` 可以是单个整数、显式 rate 列表，或 `[min, max]` 范围。当前配置使用 `[8000, 40000]`，每次构造该任务时会从区间内固定 audio super-resolution bucket（8000、11025、12000、16000、22050、24000、32000、40000）采样一个低采样率来生成降质 `src`，但 payload 仍只有 `task_id="super_resolution"`，模型不接收具体 rate 条件。不要在训练热路径中采任意整数 rate：例如与 44100 近似互质的 rate 会让 torchaudio sinc resample kernel 极大，阻塞 DataLoader worker。audio super-resolution 降质使用缓存的 `torchaudio.transforms.Resample` 先降到低采样率再升回训练采样率，依赖 sinc lowpass/anti-alias 过滤超过低采样率 Nyquist 的频率；resample 后如有长度误差，只裁剪或重复尾部 sample，不再对整段音频做线性插值。分离任务只接受 `PreparedSeparationDataset` 提供的显式 `mixture` 和目标 stem，不再根据 `vocals/accompaniment` 或其他 stem 兜底合成 mixture。
 
-## 推理入口
+## 历史推理入口
 
 推理辅助类 `scripts.mossland-codec.inference.EncoderDecoder` 通过 `scripts.factory.load_model()` 读取模型。推荐传 checkpoint 目录，目录内应包含 `config.yaml` 和 `checkpoint.ckpt`：
 

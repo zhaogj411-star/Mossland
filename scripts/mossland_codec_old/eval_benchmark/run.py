@@ -146,7 +146,7 @@ def run(args: argparse.Namespace) -> None:
                 model,
                 item,
                 output_dir=output_dir / "predictions",
-                dont_quantize=not args.quantized,
+                quantize=args.quantized,
                 overwrite=args.overwrite_predictions,
             )
             item = EvalItem(**{**item.__dict__, "prediction_path": prediction_path})
