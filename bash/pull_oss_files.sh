@@ -24,7 +24,37 @@ if [[ ! -f "${RCLONE_CONFIG}" ]]; then
   exit 1
 fi
 
-mkdir -p "${LOCAL_DST}"
+remote_is_file() {
+  local remote_path="$1"
+  local stat_json
+  stat_json="$("${RCLONE}" lsjson --stat "${remote_path}" --config "${RCLONE_CONFIG}" 2>/dev/null || true)"
+  [[ "${stat_json}" == *'"IsDir": false'* ]] || [[ "${stat_json}" == *'"IsDir":false'* ]]
+}
+
+local_file_destination() {
+  local remote_src="$1"
+  local local_dst="$2"
+  local source_name dst_name
+  source_name="${remote_src##*/}"
+  dst_name="$(basename "${local_dst}")"
+
+  if [[ "${local_dst}" == */ ]] || [[ -d "${local_dst}" ]]; then
+    printf '%s/%s\n' "${local_dst%/}" "${source_name}"
+    return
+  fi
+
+  if [[ -f "${local_dst}" ]]; then
+    printf '%s\n' "${local_dst}"
+    return
+  fi
+
+  if [[ "${dst_name}" == "${source_name}" ]] || [[ "${dst_name}" == *.* ]]; then
+    printf '%s\n' "${local_dst}"
+    return
+  fi
+
+  printf '%s/%s\n' "${local_dst%/}" "${source_name}"
+}
 
 echo "Pull OSS data to local"
 echo "  oss: ${OSS_SRC}"
@@ -32,9 +62,23 @@ echo "  local: ${LOCAL_DST}"
 echo "  transfers: ${TRANSFERS}"
 echo "  checkers: ${CHECKERS}"
 
-"${RCLONE}" copy "${OSS_SRC}" "${LOCAL_DST}" \
-  --config "${RCLONE_CONFIG}" \
-  -P \
-  --transfers "${TRANSFERS}" \
-  --checkers "${CHECKERS}" \
-  # --fast-list
+if remote_is_file "${OSS_SRC}"; then
+  LOCAL_FILE_DST="$(local_file_destination "${OSS_SRC}" "${LOCAL_DST}")"
+  mkdir -p "$(dirname "${LOCAL_FILE_DST}")"
+  echo "  mode: file -> file"
+  echo "  local file: ${LOCAL_FILE_DST}"
+  "${RCLONE}" copyto "${OSS_SRC}" "${LOCAL_FILE_DST}" \
+    --config "${RCLONE_CONFIG}" \
+    -P \
+    --transfers "${TRANSFERS}" \
+    --checkers "${CHECKERS}"
+else
+  mkdir -p "${LOCAL_DST}"
+  echo "  mode: directory -> directory"
+  "${RCLONE}" copy "${OSS_SRC}" "${LOCAL_DST}" \
+    --config "${RCLONE_CONFIG}" \
+    -P \
+    --transfers "${TRANSFERS}" \
+    --checkers "${CHECKERS}" \
+    --fast-list
+fi

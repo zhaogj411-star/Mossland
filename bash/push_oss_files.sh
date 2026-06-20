@@ -29,15 +29,66 @@ if [[ ! -e "${LOCAL_SRC}" ]]; then
   exit 1
 fi
 
+remote_is_dir() {
+  local remote_path="$1"
+  local stat_json
+  stat_json="$("${RCLONE}" lsjson --stat "${remote_path}" --config "${RCLONE_CONFIG}" 2>/dev/null || true)"
+  [[ "${stat_json}" == *'"IsDir": true'* ]] || [[ "${stat_json}" == *'"IsDir":true'* ]]
+}
+
+remote_is_file() {
+  local remote_path="$1"
+  local stat_json
+  stat_json="$("${RCLONE}" lsjson --stat "${remote_path}" --config "${RCLONE_CONFIG}" 2>/dev/null || true)"
+  [[ "${stat_json}" == *'"IsDir": false'* ]] || [[ "${stat_json}" == *'"IsDir":false'* ]]
+}
+
+remote_file_destination() {
+  local source_file="$1"
+  local remote_dst="$2"
+  local source_name dst_name
+  source_name="$(basename "${source_file}")"
+  dst_name="${remote_dst##*/}"
+
+  if [[ "${remote_dst}" == */ ]] || remote_is_dir "${remote_dst}"; then
+    printf '%s/%s\n' "${remote_dst%/}" "${source_name}"
+    return
+  fi
+
+  if remote_is_file "${remote_dst}"; then
+    printf '%s\n' "${remote_dst}"
+    return
+  fi
+
+  if [[ "${dst_name}" == "${source_name}" ]] || [[ "${dst_name}" == *.* ]]; then
+    printf '%s\n' "${remote_dst}"
+    return
+  fi
+
+  printf '%s/%s\n' "${remote_dst%/}" "${source_name}"
+}
+
 echo "Push local data to OSS"
 echo "  local: ${LOCAL_SRC}"
 echo "  oss: ${OSS_DST}"
 echo "  transfers: ${TRANSFERS}"
 echo "  checkers: ${CHECKERS}"
 
-"${RCLONE}" copy "${LOCAL_SRC}" "${OSS_DST}" \
-  --config "${RCLONE_CONFIG}" \
-  -P \
-  --transfers "${TRANSFERS}" \
-  --checkers "${CHECKERS}" \
-  --fast-list
+if [[ -f "${LOCAL_SRC}" ]]; then
+  OSS_FILE_DST="$(remote_file_destination "${LOCAL_SRC}" "${OSS_DST}")"
+  echo "  mode: file -> file"
+  echo "  oss file: ${OSS_FILE_DST}"
+  "${RCLONE}" copyto "${LOCAL_SRC}" "${OSS_FILE_DST}" \
+    --config "${RCLONE_CONFIG}" \
+    -P \
+    --transfers "${TRANSFERS}" \
+    --checkers "${CHECKERS}"
+else
+  echo "  mode: directory -> directory"
+  "${RCLONE}" copy "${LOCAL_SRC}" "${OSS_DST}" \
+    --config "${RCLONE_CONFIG}" \
+    -P \
+    --transfers "${TRANSFERS}" \
+    --checkers "${CHECKERS}" \
+    --fast-list
+fi

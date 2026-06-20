@@ -11,7 +11,7 @@ Mossland 当前包含 agent harness 和音乐多任务 codec 训练代码。
 - `agent-code/scripts/codex-hook.sh`：生命周期提醒 hook。
 - `agent-code/tests/agent/`：agent harness 测试。
 - `bash/eval_mossland_codec_checkpoint.sh`：旧 Mossland codec Lightning checkpoint 评测流水线，面向已归档的 `scripts/_archive/mossland_codec_old/` 评测/推理栈；当前新 `scripts/mossland_codec/` 训练包还没有迁入旧 full eval pipeline。该脚本随旧栈归档，按需参考。
-- `bash/push_oss_files.sh`、`bash/pull_oss_files.sh`：使用 `scripts/tools/oss_tools/bin/rclone` 和本机 `rclone.conf` 在本地 `NETEASE_SPIDER` 与 OSS `qz_oss2:embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER` 之间同步；支持命令行参数或 `LOCAL_SRC/OSS_DST/OSS_SRC/LOCAL_DST/TRANSFERS/CHECKERS` 覆盖。
+- `bash/push_oss_files.sh`、`bash/pull_oss_files.sh`：使用 `scripts/tools/oss_tools/bin/rclone` 和本机 `rclone.conf` 在本地与 OSS 之间同步；支持命令行参数或 `LOCAL_SRC/OSS_DST/OSS_SRC/LOCAL_DST/TRANSFERS/CHECKERS` 覆盖。源是目录时使用 `rclone copy` 做目录同步；源是单文件时使用 `rclone copyto` 直传文件。目标已存在为目录或以 `/` 结尾时自动追加源文件名，否则按显式文件路径写入，避免把目标文件名建成目录。
 - `bash/prepare_seperation/node0.sh` 到 `node3.sh`：4 台机器多机多卡 separation 预处理启动脚本；每台机器 8 卡，总 `--num-shards 32`，每张 GPU 一个独立进程，使用全局 `--shard-id`，日志写入 `NETEASE_SPIDER_SEPERATION_NEW/_logs/prepare_separation_multinode/`。
 - `bash/start_train.sh`：单机 8 卡 Mossland codec 训练入口，调用 `python -m scripts.train experiment=mossland-codec trainer.devices=8`。
 - `bash/start_train_multinode.sh`：Mossland codec 单机/多节点训练入口。无平台 `PET_*` 环境变量时默认单机 8 卡：`PET_NPROC_PER_NODE=8`、`PET_NNODES=1`、`PET_NODE_RANK=0`、`MASTER_ADDR=127.0.0.1`、`MASTER_PORT=29500`；平台提供 `PET_MASTER_ADDR/PET_MASTER_PORT/PET_NPROC_PER_NODE/PET_NNODES/PET_NODE_RANK` 时映射到 Lightning 需要的 `MASTER_ADDR/MASTER_PORT/NODE_RANK`，并传入 `trainer.devices` 与 `trainer.num_nodes`。正常模式下每个节点启动一个父进程，由 Lightning 在本节点派生本地 GPU 进程；`DRY_RUN=1` 只打印命令。
