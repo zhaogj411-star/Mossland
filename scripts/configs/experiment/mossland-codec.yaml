@@ -2,9 +2,9 @@
 
 project_name: mossland-codec
 checkpoint_monitor: loss/total
-tags: ["audioCodec", "mossland-codec", "mossland-rvq", "0p5b", "stereo", "multi-task"]
+tags: ["audioCodec", "mossland-codec", "mossland-rvq", "0p5b-balanced", "stereo", "multi-task"]
 seed: 42
-resume_from_ckpt: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec/runs/2026-06-19_17-50-58/checkpoints/last.ckpt
+resume_from_ckpt: null
 pretrain_ckpt_path: null
 checkpoint_every_n_train_steps: 2000
 
@@ -28,15 +28,15 @@ data:
     dataset:
       _target_: scripts.data.datasets.PreparedSeparationDataset
       dirs:
-        - /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER_SEPERATION_NEW
-      index_file: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER_SEPERATION_NEW/index.list
+        - /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER
+      index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER/index.list
       sample_size: 112500
       sample_rate: 44100
       random_crop: true
       num_channels: 2
       strict: false
       max_duration_seconds: 300
-      crops_per_file: 8
+      crops_per_file: 4
       length: 10000000
     active_tasks:
       - reconstruct
@@ -62,18 +62,18 @@ data:
 model:
   _target_: scripts.mossland_codec.models.MosslandCodec
   sample_rate: 44100
-  base_channels: 192
+  base_channels: 128
   data_channels: 4
   hop: 512
-  mixed_precision: true
+  mixed_precision: false
   bottleneck_channels: 64
-  bottleneck_base_channels: 1536
-  num_bottleneck_layers: 4
+  bottleneck_base_channels: 1024
+  num_bottleneck_layers: 9
   quantizer_num_quantizers: 32
   quantizer_codebook_size: 1024
   quantizer_codebook_dim: null
   quantizer_dropout: 1.0
-  quantizer_decay: 0.8
+  quantizer_decay: 0.99
   quantizer_kmeans_init: true
   quantizer_kmeans_iters: 10
   quantizer_threshold_ema_dead_code: 2
@@ -85,7 +85,7 @@ model:
     - mono_to_stereo
   task_embedding_init_std: 0.02
   heads: 8
-  cond_channels: 768
+  cond_channels: 512
   use_fourier: false
   fourier_scale: 0.2
   normalization: true
@@ -96,11 +96,11 @@ model:
   sigma_max: 80.0
   rho: 7.0
   sigma_data: 0.5
-  layers_list: [2, 2, 2, 2, 2]
+  layers_list: [3, 4, 5, 5, 4]
   multipliers_list: [1, 2, 4, 4, 4]
   attention_list: [0, 0, 1, 1, 1]
   freq_downsample_list: [1, 0, 0, 0]
-  layers_list_encoder: [1, 1, 1, 1, 1]
+  layers_list_encoder: [2, 3, 4, 4, 3]
   attention_list_encoder: [0, 0, 1, 1, 1]
   frequency_scaling: true
   pre_normalize_2d_to_1d: true
@@ -121,8 +121,8 @@ wrapper:
   weight_decay: 0.0
   optimizer_name: radam
   lr_schedule: cosine_decay
-  lr_warmup_steps: 100
-  lr_schedule_total_steps: 800000
+  lr_warmup_steps: 1000
+  lr_schedule_total_steps: 500000
   final_learning_rate: 1e-6
   rvq_commitment_weight: 0.0
   rvq_codebook_weight: 0.0
@@ -133,7 +133,7 @@ wrapper:
   train_n_quantizers_choices: [8, 16, 32]
   consistency_step: 0.1
   consistency_step_schedule: exponential
-  consistency_step_total_steps: 800000
+  consistency_step_total_steps: 500000
   consistency_step_end_exp: 3.0
   sigma_sampling: lognormal
   lognormal_mean: -1.1

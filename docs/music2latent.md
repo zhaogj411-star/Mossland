@@ -24,7 +24,7 @@
 PYTHONPATH=$PWD python -m scripts.train experiment=music2latent
 ```
 
-`scripts/configs/experiment/music2latent.yaml` 当前使用 `scripts.music2latent.data.Music2LatentOfficialPTDataset` 读取预裁好的 `.pt` mono waveform。2026-06-19 本机调试口径指向 `tmp/music2latent_local_2s_pt/files.list`：物理 10 条样本，源自 `/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER`，每条 `audio` 是 44.1 kHz、2 秒、`float32`、shape `(88200,)`。`data.dataset.length=160000` 保持原训练逻辑，会循环这 10 条物理样本。
+`scripts/configs/experiment/music2latent.yaml` 当前使用 `scripts.music2latent.data.Music2LatentOfficialPTDataset` 读取预裁好的 `.pt` mono waveform。2026-06-20 本机训练口径指向 `tmp/music2latent_official_pt_10k/files.list`；该目录已有 `000000.pt` 到 `009999.pt` 共 10000 个预处理样本，当前清单启用前 1000 条。每条 `audio` 是官方短窗长度 `34304` samples 的 44.1 kHz mono `float32` crop，源自本机 Sonata `NETEASE_SPIDER/audio/.../*.mp3`。`data.dataset.length=160000` 保持原训练逻辑，会循环这 1000 条物理样本。
 
 模型参数按官方 Music2Latent 训练口径设置：`hop=512`、`fac=4`、`data_length=64`；官方短窗长度是 `hop * data_length + (fac - 1) * hop = 34304`。当前 2 秒本机样本更长，wrapper 的 `training_step()` 会把 waveform 裁到合法长度，使 STFT frame 数可被 `2 ** freq_downsample_list.count(0)` 整除；例如默认 `[1,0,0,0]` 要求 frame 数是 8 的倍数，避免长音频出现 decoder skip feature 的 `582` vs `584` 这类 shape mismatch。
 

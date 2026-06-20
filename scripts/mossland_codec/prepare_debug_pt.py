@@ -13,8 +13,8 @@ from scripts.mossland_codec.tasks import TASK_NAMES, build_task_batch
 
 
 DEFAULT_SOURCE_ROOT = (
-    "/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/"
-    "NETEASE_SPIDER_SEPERATION_NEW"
+    "/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/"
+    "source_seperation/NETEASE_SPIDER"
 )
 DEFAULT_OUTPUT_ROOT = "tmp/mossland_codec_debug_pt"
 

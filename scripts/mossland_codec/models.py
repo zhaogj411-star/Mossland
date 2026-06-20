@@ -897,7 +897,7 @@ class MosslandCodec(nn.Module):
 
         if self.quantizer_num_quantizers > 0:
             self.quantizer = ResidualVectorQuantize(
-                input_dim=bottleneck_base_channels,
+                input_dim=bottleneck_channels,
                 n_codebooks=self.quantizer_num_quantizers,
                 codebook_size=quantizer_codebook_size,
                 codebook_dim=quantizer_codebook_dim,
@@ -1076,20 +1076,20 @@ class MosslandCodec(nn.Module):
             raise RuntimeError("MosslandCodec quantizer is disabled")
 
         continuous, hidden = self.encoder(representation, return_hidden=True)
-        quantizer_input = hidden.detach() if detach_encoder else hidden
+        quantizer_input = continuous.detach() if detach_encoder else continuous
         (
-            quantized_hidden,
+            quantized,
             codes,
             commitment_loss,
         ) = self.quantizer(quantizer_input, n_quantizers=n_quantizers)
-        discrete = self.encoder.hidden_to_latent(quantized_hidden)
-        distill_loss = F.mse_loss(quantized_hidden.float(), hidden.detach().float())
-        codebook_loss = hidden.new_zeros(())
+        discrete = quantized
+        distill_loss = F.mse_loss(quantized.float(), continuous.detach().float())
+        codebook_loss = continuous.new_zeros(())
         return QuantizedLatents(
             continuous=continuous,
             discrete=discrete,
             codes=codes,
-            projected_latents=quantized_hidden,
+            projected_latents=quantized,
             commitment_loss=commitment_loss,
             codebook_loss=codebook_loss,
             distill_loss=distill_loss,
@@ -1098,8 +1098,8 @@ class MosslandCodec(nn.Module):
     def latent_from_codes(self, codes):
         if self.quantizer is None:
             raise RuntimeError("MosslandCodec quantizer is disabled")
-        quantized_hidden, _ = self.quantizer.from_codes(codes)
-        return self.encoder.hidden_to_latent(quantized_hidden)
+        quantized, _ = self.quantizer.from_codes(codes)
+        return quantized
 
     @torch.no_grad()
     def decode_codes(

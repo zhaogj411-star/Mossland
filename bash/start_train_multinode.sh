@@ -2,14 +2,14 @@
 set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-PYTHON_BIN="${PYTHON_BIN:-/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/py_env/bin/python}"
-EXPERIMENT="${EXPERIMENT:-mossland-codec-no-rvq}"
-: "${PET_NPROC_PER_NODE:?PET_NPROC_PER_NODE is required}"
-: "${PET_NNODES:?PET_NNODES is required}"
-: "${PET_NODE_RANK:?PET_NODE_RANK is required}"
+PYTHON_BIN="${PYTHON_BIN:-/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/envs/main_env/bin/python}"
+EXPERIMENT="${EXPERIMENT:-mossland-codec}"
+PET_NPROC_PER_NODE="${PET_NPROC_PER_NODE:-8}"
+PET_NNODES="${PET_NNODES:-1}"
+PET_NODE_RANK="${PET_NODE_RANK:-0}"
 
-export MASTER_ADDR="${PET_MASTER_ADDR:-${MASTER_ADDR:?MASTER_ADDR or PET_MASTER_ADDR is required}}"
-export MASTER_PORT="${PET_MASTER_PORT:-${MASTER_PORT:?MASTER_PORT or PET_MASTER_PORT is required}}"
+export MASTER_ADDR="${PET_MASTER_ADDR:-${MASTER_ADDR:-127.0.0.1}}"
+export MASTER_PORT="${PET_MASTER_PORT:-${MASTER_PORT:-29500}}"
 export NODE_RANK="${PET_NODE_RANK}"
 export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export WANDB_MODE="${WANDB_MODE:-offline}"

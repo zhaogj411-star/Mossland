@@ -330,6 +330,9 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
                 self.log("rvq/n_quantizers", float(n_quantizers), prog_bar=False)
             self._log_tensor_stats("latent/continuous", quantized.continuous)
             self._log_tensor_stats("latent/discrete", quantized.discrete)
+        else:
+            latent_override = self.model.encoder(src_representation)
+            self._log_tensor_stats("latent/continuous", latent_override)
 
         consistency_loss, metrics, predicted, target = self._consistency_loss(
             target_representation,

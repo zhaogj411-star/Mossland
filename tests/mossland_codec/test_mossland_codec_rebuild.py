@@ -34,6 +34,39 @@ class RecordingModel(nn.Module):
         return x * self.weight
 
 
+class IdentityAudioProcessor:
+    fac = 4
+
+    def to_representation_encoder(self, audio):
+        return audio.unsqueeze(2)
+
+
+class SourceRecordingNoRvqModel(nn.Module):
+    sigma_min = 0.002
+    sigma_max = 80.0
+    rho = 7.0
+    hop = 1
+    freq_downsample_list = []
+    has_quantizer = False
+
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(()))
+        self.audio_processor = IdentityAudioProcessor()
+        self.encoder_inputs = []
+        self.latent_overrides = []
+
+    def encoder(self, representation):
+        self.encoder_inputs.append(representation.detach().clone())
+        return representation + 10.0
+
+    def forward(self, latents, x, sigma=None, latent_override=None, task_id=None):
+        self.latent_overrides.append(
+            None if latent_override is None else latent_override.detach().clone()
+        )
+        return x * self.weight
+
+
 def test_mossland_codec_config_targets_mossland_rvq_package():
     with initialize_config_dir(
         config_dir=str(ROOT / "scripts" / "configs"),
@@ -209,6 +242,38 @@ def test_mossland_wrapper_passes_task_id_to_consistency_model():
     )
 
     assert model.task_ids == [task_id, task_id]
+
+
+def test_mossland_no_rvq_training_uses_source_latent_override():
+    wrapper_mod = import_module("scripts.mossland_codec.wrapper")
+    model = SourceRecordingNoRvqModel()
+    wrapper = wrapper_mod.MosslandCodecTrainingWrapper(
+        model=model,
+        use_ema=False,
+        sigma_sampling="uniform",
+        consistency_step_schedule="constant",
+        fail_on_nonfinite=False,
+    )
+    wrapper.log = lambda *args, **kwargs: None
+
+    src = torch.ones(2, 2, 8)
+    target = torch.zeros(2, 2, 8)
+    payload = {
+        "src": src,
+        "target": target,
+        "task_id": ("separate_vocals", "separate_accompaniment"),
+    }
+
+    loss = wrapper.training_step((payload, {}), 0)
+
+    expected_source_representation = src.unsqueeze(2)
+    expected_source_latent = expected_source_representation + 10.0
+    assert torch.isfinite(loss)
+    assert len(model.encoder_inputs) == 1
+    assert torch.allclose(model.encoder_inputs[0], expected_source_representation)
+    assert len(model.latent_overrides) == 2
+    assert torch.allclose(model.latent_overrides[0], expected_source_latent)
+    assert torch.allclose(model.latent_overrides[1], expected_source_latent)
 
 
 def test_mossland_task_pt_dataset_returns_preprocessed_payload(tmp_path):
