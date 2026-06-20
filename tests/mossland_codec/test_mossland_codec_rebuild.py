@@ -48,6 +48,13 @@ class SourceRecordingNoRvqModel(nn.Module):
     hop = 1
     freq_downsample_list = []
     has_quantizer = False
+    task_names = (
+        "reconstruct",
+        "separate_vocals",
+        "separate_accompaniment",
+        "super_resolution",
+        "mono_to_stereo",
+    )
 
     def __init__(self):
         super().__init__()
@@ -274,6 +281,39 @@ def test_mossland_no_rvq_training_uses_source_latent_override():
     assert len(model.latent_overrides) == 2
     assert torch.allclose(model.latent_overrides[0], expected_source_latent)
     assert torch.allclose(model.latent_overrides[1], expected_source_latent)
+
+
+def test_mossland_task_logging_writes_zero_for_absent_tasks():
+    wrapper_mod = import_module("scripts.mossland_codec.wrapper")
+    model = SourceRecordingNoRvqModel()
+    wrapper = wrapper_mod.MosslandCodecTrainingWrapper(
+        model=model,
+        use_ema=False,
+        sigma_sampling="uniform",
+        consistency_step_schedule="constant",
+        fail_on_nonfinite=False,
+    )
+    logged = {}
+
+    def capture_log(name, value, **kwargs):
+        if name.startswith("task/"):
+            logged[name] = (float(value), kwargs)
+
+    wrapper.log = capture_log
+    payload = {
+        "src": torch.ones(2, 2, 8),
+        "target": torch.zeros(2, 2, 8),
+        "task_id": ("separate_vocals", "separate_accompaniment"),
+    }
+
+    wrapper.training_step((payload, {}), 0)
+
+    assert logged["task/separate_vocals"][0] == 0.5
+    assert logged["task/separate_accompaniment"][0] == 0.5
+    assert logged["task/reconstruct"][0] == 0.0
+    assert logged["task/super_resolution"][0] == 0.0
+    assert logged["task/mono_to_stereo"][0] == 0.0
+    assert all(kwargs["sync_dist"] is True for _, kwargs in logged.values())
 
 
 def test_mossland_task_pt_dataset_returns_preprocessed_payload(tmp_path):

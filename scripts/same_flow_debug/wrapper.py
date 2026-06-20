@@ -1,7 +1,7 @@
 import lightning as pl
 import math
 
-from .training_base import (
+from scripts.codec_common.training_base import (
     CodecTrainingBase,
     add_noise,
     get_sigma_continuous,

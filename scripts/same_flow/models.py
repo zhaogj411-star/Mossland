@@ -9,7 +9,7 @@ from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
 
 from .audio import AudioProcessor
-from .quantize import ResidualVectorQuantize
+from scripts.codec_common.quantize import ResidualVectorQuantize
 from .transformer import TransformerBlock
 
 

@@ -1,12 +1,12 @@
 # @package _global_
 
-project_name: mossland-codec
+project_name: mossland-codec-rvq
 checkpoint_monitor: loss/total
-tags: ["audioCodec", "mossland-codec", "mossland-rvq", "0p5b-balanced", "stereo", "multi-task"]
+tags: ["audioCodec", "mossland-codec", "rvq", "music2latent-spec", "stereo", "multi-task"]
 seed: 42
 resume_from_ckpt: null
 pretrain_ckpt_path: null
-checkpoint_every_n_train_steps: 2000
+checkpoint_every_n_train_steps: 1000
 
 trainer:
   devices: [0, 1, 2, 3, 4, 5, 6, 7]
@@ -14,61 +14,37 @@ trainer:
   precision: bf16-mixed
   max_steps: 800000
   max_epochs: 10000000
-  # accumulate_grad_batches: 16
-  gradient_clip_val: 0.3
-  # gradient_clip_algorithm: null
-  log_every_n_steps: 10
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+  log_every_n_steps: 1
   num_sanity_val_steps: 0
   check_val_every_n_epoch: null
 
 data:
   _target_: scripts.data.datasets.Experiment_Dataset
   dataset:
-    _target_: scripts.mossland_codec.tasks.MosslandTaskDataset
-    dataset:
-      _target_: scripts.data.datasets.PreparedSeparationDataset
-      dirs:
-        - /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER
-      index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER/index.list
-      sample_size: 112500
-      sample_rate: 44100
-      random_crop: true
-      num_channels: 2
-      strict: false
-      max_duration_seconds: 300
-      crops_per_file: 4
-      length: 10000000
-    active_tasks:
-      - reconstruct
-      - separate_vocals
-      - separate_accompaniment
-      - super_resolution
-      - mono_to_stereo
-    task_weights:
-      reconstruct: 6.0
-      separate_vocals: 1.0
-      separate_accompaniment: 1.0
-      super_resolution: 1.0
-      mono_to_stereo: 1.0
-    sample_rate: 44100
-    low_sample_rate: [8000, 40000]
+    _target_: scripts.mossland_codec.tasks.MosslandTaskPTDataset
+    root: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/mossland_codec_no_rvq_music2latent_spec_pt
+    index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/mossland_codec_no_rvq_music2latent_spec_pt/files.list
+    length: 160000
   pin_memory: true
   val_split: null
-  train_batch_size: 1
+  train_batch_size: 64
   val_batch_size: 1
-  num_workers: 8
+  num_workers: 16
   prefetch_factor: 2
 
 model:
   _target_: scripts.mossland_codec.models.MosslandCodec
   sample_rate: 44100
-  base_channels: 128
+  base_channels: 64
   data_channels: 4
   hop: 512
-  mixed_precision: false
+  mixed_precision: true
   bottleneck_channels: 64
-  bottleneck_base_channels: 1024
-  num_bottleneck_layers: 9
+  bottleneck_base_channels: 512
+  num_bottleneck_layers: 4
   quantizer_num_quantizers: 32
   quantizer_codebook_size: 1024
   quantizer_codebook_dim: null
@@ -84,8 +60,8 @@ model:
     - super_resolution
     - mono_to_stereo
   task_embedding_init_std: 0.02
-  heads: 8
-  cond_channels: 512
+  heads: 4
+  cond_channels: 256
   use_fourier: false
   fourier_scale: 0.2
   normalization: true
@@ -96,11 +72,11 @@ model:
   sigma_max: 80.0
   rho: 7.0
   sigma_data: 0.5
-  layers_list: [3, 4, 5, 5, 4]
+  layers_list: [2, 2, 2, 2, 2]
   multipliers_list: [1, 2, 4, 4, 4]
   attention_list: [0, 0, 1, 1, 1]
   freq_downsample_list: [1, 0, 0, 0]
-  layers_list_encoder: [2, 3, 4, 4, 3]
+  layers_list_encoder: [1, 1, 1, 1, 1]
   attention_list_encoder: [0, 0, 1, 1, 1]
   frequency_scaling: true
   pre_normalize_2d_to_1d: true
@@ -121,8 +97,8 @@ wrapper:
   weight_decay: 0.0
   optimizer_name: radam
   lr_schedule: cosine_decay
-  lr_warmup_steps: 1000
-  lr_schedule_total_steps: 500000
+  lr_warmup_steps: 10
+  lr_schedule_total_steps: 800000
   final_learning_rate: 1e-6
   rvq_commitment_weight: 0.0
   rvq_codebook_weight: 0.0
@@ -133,7 +109,7 @@ wrapper:
   train_n_quantizers_choices: [8, 16, 32]
   consistency_step: 0.1
   consistency_step_schedule: exponential
-  consistency_step_total_steps: 500000
+  consistency_step_total_steps: 800000
   consistency_step_end_exp: 3.0
   sigma_sampling: lognormal
   lognormal_mean: -1.1
@@ -148,8 +124,8 @@ callbacks:
   demo_callback:
     _target_: scripts.mossland_codec.wrapper.MosslandCodecTrainingCallback
     demo_dir: ${paths.output_dir}/demos
-    demo_num: 2
-    demo_every: 1000
+    demo_num: 4
+    demo_every: 100
     sample_rate: 44100
     demo_n_quantizers_choices: [8, 16, 32]
     denoising_steps: 1

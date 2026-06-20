@@ -10,6 +10,11 @@ import torch
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 
+from pathlib import Path
+
+# Repo-relative configs dir (tests/music2latent/ -> repo root -> scripts/configs).
+_CONFIG_DIR = str(Path(__file__).resolve().parents[2] / "scripts" / "configs")
+
 
 def _install_fake_residual_vq(monkeypatch):
     class FakeResidualVQ(torch.nn.Module):
@@ -424,7 +429,7 @@ def test_training_wrapper_reports_nonfinite_gradients(monkeypatch):
 def test_hydra_experiment_instantiates_music2latent_components(monkeypatch):
     _install_fake_residual_vq(monkeypatch)
     with initialize_config_dir(
-        config_dir="/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/scripts/configs",
+        config_dir=_CONFIG_DIR,
         version_base=None,
     ):
         cfg = compose(
@@ -476,7 +481,7 @@ def test_hydra_experiment_instantiates_music2latent_components(monkeypatch):
 
 def test_music2latent_0p5b_stereo_keeps_original_latent_width():
     with initialize_config_dir(
-        config_dir="/inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/Mossland/scripts/configs",
+        config_dir=_CONFIG_DIR,
         version_base=None,
     ):
         cfg = compose(

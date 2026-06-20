@@ -1,6 +1,6 @@
 from scripts.music2latent.audio import AudioProcessor
 from scripts.music2latent.local_transformer import AxialLocalAttentionResBlock
-from scripts.music2latent.quantize import ResidualVectorQuantize
+from scripts.codec_common.quantize import ResidualVectorQuantize
 from scripts.same.transformer import TransformerBlock as SameTransformerBlock
 
 # from .audio import *

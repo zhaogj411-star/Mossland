@@ -1,5 +1,5 @@
 from .audio import AudioProcessor
-from .quantize import ResidualVectorQuantize
+from scripts.codec_common.quantize import ResidualVectorQuantize
 from .tasks import TASK_NAMES
 
 # from .audio import *

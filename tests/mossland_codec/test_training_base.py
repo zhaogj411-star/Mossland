@@ -4,7 +4,7 @@ import importlib
 import pytest
 import torch
 
-training_base = importlib.import_module("scripts.mossland-codec.training_base")
+training_base = importlib.import_module("scripts.codec_common.training_base")
 CodecTrainingBase = training_base.CodecTrainingBase
 pseudo_huber_loss = training_base.pseudo_huber_loss
 

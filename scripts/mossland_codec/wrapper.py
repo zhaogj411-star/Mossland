@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import os
 from typing import Sequence
+from safetensors.torch import save_file, save_model
 
 import lightning as pl
 import torch
@@ -12,7 +13,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from .models import MosslandCodec
 from .tasks import MosslandTaskBatch
-from .training_base import (
+from scripts.codec_common.training_base import (
     CodecTrainingBase,
     add_noise,
     get_sigma_continuous,
@@ -359,14 +360,15 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
             self.log("loss/rvq", rvq_loss, prog_bar=False)
 
         task_ids = _label_tuple(task.task_id)
-        for task_id in dict.fromkeys(task_ids):
+        task_names = tuple(dict.fromkeys((*getattr(self.model, "task_names", ()), *task_ids)))
+        for task_id in task_names:
             self.log(
                 f"task/{task_id}",
                 task_ids.count(task_id) / len(task_ids),
                 prog_bar=False,
                 on_step=True,
                 on_epoch=False,
-                sync_dist=False,
+                sync_dist=True,
             )
         self._assert_finite("loss", loss, info)
         self.log("loss/total", loss, prog_bar=True)
@@ -375,6 +377,16 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
     def on_before_zero_grad(self, *args, **kwargs):
         if hasattr(self, "ema"):
             self.ema.update()
+    def export_model(self, path, use_safetensors=False, export_ema=False):
+        model = self.model
+        if export_ema:
+            model = self.ema.ema_model
+
+        if use_safetensors:
+            save_model(model, path)
+        else:
+            torch.save({"state_dict": model.state_dict()}, path)
+
 
 
 class MosslandCodecTrainingCallback(pl.Callback):

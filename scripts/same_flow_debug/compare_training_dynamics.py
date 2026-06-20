@@ -17,7 +17,7 @@ import hydra
 import torch
 from hydra import compose, initialize_config_dir
 
-from scripts.music2latent.training_base import add_noise, pseudo_huber_loss
+from scripts.codec_common.training_base import add_noise, pseudo_huber_loss
 
 
 ROOT = Path(__file__).resolve().parents[2]

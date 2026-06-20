@@ -9,7 +9,7 @@ import torchaudio
 from ema_pytorch import EMA
 
 from scripts.data.datasets import SampleDataset
-from scripts.music2latent.training_base import (
+from scripts.codec_common.training_base import (
     add_noise,
     get_sigma_continuous,
     pseudo_huber_loss,

@@ -6,7 +6,7 @@ import pytest
 import torch
 
 datasets = pytest.importorskip("scripts.data.datasets")
-tasks = importlib.import_module("scripts.mossland-codec.tasks")
+tasks = importlib.import_module("scripts.mossland_codec.tasks")
 
 
 class TinyCountDataset(torch.utils.data.Dataset):

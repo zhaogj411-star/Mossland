@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import torch
 from torch.utils.data import DataLoader
 
-tasks = importlib.import_module("scripts.mossland-codec.tasks")
+tasks = importlib.import_module("scripts.mossland_codec.tasks")
 TASK_NAMES = tasks.TASK_NAMES
 MosslandTaskDataset = tasks.MosslandTaskDataset
 MosslandTaskRoutedDataset = tasks.MosslandTaskRoutedDataset

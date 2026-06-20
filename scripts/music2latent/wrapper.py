@@ -1,6 +1,6 @@
 import lightning as pl
 
-from scripts.music2latent.training_base import (
+from scripts.codec_common.training_base import (
     CodecTrainingBase,
     add_noise,
     get_sigma_continuous,
