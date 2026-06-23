@@ -5,7 +5,7 @@ from .transformer_layers import MLP, AttentionBlock, AdaptiveNorm, zero_init, in
 
 
 class Transformer(nn.Module):
-    def __init__(self, input_dim, output_dim, training_length=None, dim=512, num_layers=12, heads=8, mlp_mult=4, pos_emb='learned', autoregressive=False, latents_per_timestep=None, dropout=0.):
+    def __init__(self, input_dim, output_dim, training_length=None, dim=512, num_layers=12, heads=8, mlp_mult=4, pos_emb='learned', autoregressive=False, latents_per_timestep=None, dropout=0., zero_output_init=True):
         super().__init__()
 
         self.training_length = training_length
@@ -24,10 +24,11 @@ class Transformer(nn.Module):
         self.linear_input = init(nn.Linear(input_dim, dim))
         self.norm_input = AdaptiveNorm(dim)
         self.norm_output = AdaptiveNorm(dim)
-        self.linear_output = zero_init(nn.Linear(dim, output_dim))
+        output_linear = nn.Linear(dim, output_dim)
+        self.linear_output = zero_init(output_linear) if zero_output_init else init(output_linear)
 
         self.layers = nn.ModuleList([
-            AttentionBlock(dim, heads=heads, mlp_mult=mlp_mult, training_length=training_length, causal=self.autoregressive, pos_emb=pos_emb, group_together=latents_per_timestep, dropout=dropout) for _ in range(num_layers)
+            AttentionBlock(dim, heads=heads, mlp_mult=mlp_mult, training_length=training_length, causal=self.autoregressive, pos_emb=pos_emb, group_together=latents_per_timestep, dropout=dropout, zero_output_init=zero_output_init) for _ in range(num_layers)
         ])
 
     def forward(self, x, latent, return_latents=False, skip_input_layer=False, skip_output_layer=False, attn_mask=None, print_magnitudes=False):
@@ -41,8 +42,7 @@ class Transformer(nn.Module):
         x = torch.cat([x, latent], dim=-2)
 
         if self.pe is not None:
-            pe = self.pe[:, :x.size(-2)]
-            x = x + pe
+            x = x + self.pe[:, :x.size(-2)]
 
         if self.pe_latents_per_timestep is not None:
             pe_latents_per_timestep = self.pe_latents_per_timestep.repeat(1, x.size(-2)//self.pe_latents_per_timestep.size(-2), 1)
@@ -70,7 +70,7 @@ class Transformer(nn.Module):
 
 
 class Transformer_Diffusion(nn.Module):
-    def __init__(self, input_dim, output_dim, training_length=None, cond_dim=None, dim=512, num_layers=12, heads=8, mlp_mult=4, pos_emb='learned', autoregressive=False, latents_per_timestep=None, dropout=0.):
+    def __init__(self, input_dim, output_dim, training_length=None, cond_dim=None, dim=512, num_layers=12, heads=8, mlp_mult=4, pos_emb='learned', autoregressive=False, latents_per_timestep=None, dropout=0., zero_output_init=True):
         super().__init__()
 
         self.training_length = training_length
@@ -95,7 +95,7 @@ class Transformer_Diffusion(nn.Module):
             raise ValueError("Dimensionality of conditioning cond_dim must be provided!")
 
         self.layers = nn.ModuleList([
-            AttentionBlock(dim, heads=heads, mlp_mult=mlp_mult, cond_dim=cond_dim, training_length=training_length, causal=self.autoregressive, pos_emb=pos_emb, group_together=latents_per_timestep, dropout=dropout) for _ in range(num_layers)
+            AttentionBlock(dim, heads=heads, mlp_mult=mlp_mult, cond_dim=cond_dim, training_length=training_length, causal=self.autoregressive, pos_emb=pos_emb, group_together=latents_per_timestep, dropout=dropout, zero_output_init=zero_output_init) for _ in range(num_layers)
         ])
 
     def forward(self, x, cond, latent, more_latent=None, skip_input_layer=False, skip_output_layer=False, attn_mask=None, print_magnitudes=False):
@@ -108,16 +108,14 @@ class Transformer_Diffusion(nn.Module):
             if print_magnitudes:
                 print(f"Linear Input: {x.abs().mean()}")
 
-        x1,x2 = torch.chunk(x, chunks=2, dim=-2)
-        lat1,lat2 = torch.chunk(latent, chunks=2, dim=-2)
+        input_length = x.size(-2)
         if more_latent is not None:
-            x = torch.cat([x1, lat1, more_latent, x2, lat2, more_latent], dim=-2)
+            x = torch.cat([x, latent, more_latent], dim=-2)
         else:
-            x = torch.cat([x1, lat1, x2, lat2], dim=-2)
+            x = torch.cat([x, latent], dim=-2)
 
         if self.pe is not None:
-            pe = self.pe[:, :x.size(-2)]
-            x = x + pe
+            x = x + self.pe[:, :x.size(-2)]
 
         if self.pe_latents_per_timestep is not None:
             pe_latents_per_timestep = self.pe_latents_per_timestep.repeat(1, x.size(-2)//self.pe_latents_per_timestep.size(-2), 1)
@@ -132,10 +130,7 @@ class Transformer_Diffusion(nn.Module):
 
         x = self.norm_output(x, cond)
 
-        xlat1, xlat2 = torch.chunk(x, chunks=2, dim=-2)
-        x1 = xlat1[:, :x1.size(-2)]
-        x2 = xlat2[:, :x2.size(-2)]
-        x = torch.cat([x1, x2], dim=-2)
+        x = x[:, :input_length]
 
         if not skip_output_layer:
             x = self.linear_output(x)

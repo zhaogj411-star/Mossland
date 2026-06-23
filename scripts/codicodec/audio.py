@@ -3,7 +3,65 @@ import torch.nn.functional as F
 import numpy as np
 import librosa
 
-from .hparams import *
+
+class AudioProcessor:
+    def __init__(
+        self,
+        alpha_rescale=0.65,
+        beta_rescale=0.34,
+        hop_size=1024,
+        fac=2,
+        center_pad=False,
+    ):
+        self.alpha_rescale = alpha_rescale
+        self.beta_rescale = beta_rescale
+        self.hop_size = hop_size
+        self.fac = fac
+        self.center_pad = bool(center_pad)
+
+    def normalize_patch(self, x):
+        return normalize_patch(
+            x,
+            alpha_rescale=self.alpha_rescale,
+            beta_rescale=self.beta_rescale,
+        )
+
+    def denormalize_patch(self, x):
+        return denormalize_patch(
+            x,
+            alpha_rescale=self.alpha_rescale,
+            beta_rescale=self.beta_rescale,
+        )
+
+    def wv2complex(self, wv):
+        return wv2complex(wv, hop_size=self.hop_size, fac=self.fac)
+
+    def wv2realimag(self, wv):
+        return wv2realimag(
+            wv,
+            hop_size=self.hop_size,
+            fac=self.fac,
+            alpha_rescale=self.alpha_rescale,
+            beta_rescale=self.beta_rescale,
+        )
+
+    def realimag2wv(self, x):
+        return realimag2wv(
+            x,
+            hop_size=self.hop_size,
+            fac=self.fac,
+            alpha_rescale=self.alpha_rescale,
+            beta_rescale=self.beta_rescale,
+        )
+
+    def to_representation_encoder(self, x):
+        return self.wv2realimag(x)
+
+    def to_representation(self, x, hop=None):
+        return self.wv2realimag(x)
+
+    def to_waveform(self, x, hop=None):
+        return self.realimag2wv(x)
 
 
 def wv2spec(wv, hop_size=256, fac=4):
@@ -57,10 +115,10 @@ def patches_to_tensor(x: torch.Tensor, original_channels: int, original_height: 
 
     return x
 
-def normalize_patch(x):
+def normalize_patch(x, alpha_rescale=0.65, beta_rescale=0.34):
     return beta_rescale*torch.sign(x)*(x.abs()**alpha_rescale)
 
-def denormalize_patch(x):
+def denormalize_patch(x, alpha_rescale=0.65, beta_rescale=0.34):
     x = x/beta_rescale
     return torch.sign(x)*(x.abs()**(1./alpha_rescale))
 
@@ -68,7 +126,7 @@ def wv2complex(wv, hop_size=256, fac=4):
     X = stft(wv, hop_size=hop_size, fac=fac, device=wv.device)
     return X[:,:hop_size*(fac//2),:]
 
-def wv2realimag(wv, hop_size=256, fac=4):
+def wv2realimag(wv, hop_size=256, fac=4, alpha_rescale=0.65, beta_rescale=0.34):
     stereo = False
     if len(wv.shape) == 3:
         stereo = True
@@ -77,18 +135,18 @@ def wv2realimag(wv, hop_size=256, fac=4):
         wv = torch.cat(wv_ls, 0)
     X = wv2complex(wv, hop_size, fac)
     X = torch.stack((torch.real(X),torch.imag(X)), -3)
-    X = normalize_patch(X)
+    X = normalize_patch(X, alpha_rescale=alpha_rescale, beta_rescale=beta_rescale)
     if stereo:
         X_ls = torch.chunk(X, channels, 0)
         X = torch.cat(X_ls, -3)
     return X
 
-def wv2magnitude(wv, hop_size=256, fac=4):
+def wv2magnitude(wv, hop_size=256, fac=4, alpha_rescale=0.65, beta_rescale=0.34):
     X = stft(wv, hop_size=hop_size, fac=fac, device=wv.device)[:,:hop_size*(fac//2),:]
-    X = normalize_patch(torch.abs(X))
+    X = normalize_patch(torch.abs(X), alpha_rescale=alpha_rescale, beta_rescale=beta_rescale)
     return X
 
-def realimag2wv(x, hop_size=256, fac=4):
+def realimag2wv(x, hop_size=256, fac=4, alpha_rescale=0.65, beta_rescale=0.34):
     stereo = False
     if x.shape[-3] > 2:
         stereo = True
@@ -96,7 +154,7 @@ def realimag2wv(x, hop_size=256, fac=4):
         channels = len(x_ls)
         x = torch.cat(x_ls, 0)
     x = torch.nn.functional.pad(x, (0,0,0,1))
-    x = denormalize_patch(x)
+    x = denormalize_patch(x, alpha_rescale=alpha_rescale, beta_rescale=beta_rescale)
     real,imag = torch.chunk(x, 2, -3)
     X = torch.complex(real.squeeze(-3),imag.squeeze(-3))
     wv = istft(X, fac=fac, hop_size=hop_size, device=X.device).clamp(-1.,1.)
@@ -106,13 +164,13 @@ def realimag2wv(x, hop_size=256, fac=4):
     return wv
 
 def to_representation_encoder(x):
-    return wv2realimag(x, hop, fac)
+    raise RuntimeError("Use wv2realimag(x, hop_size, fac, alpha_rescale, beta_rescale) explicitly.")
 
 def to_representation(x):
-    return wv2realimag(x, hop, fac)
+    raise RuntimeError("Use wv2realimag(x, hop_size, fac, alpha_rescale, beta_rescale) explicitly.")
 
 def to_waveform(x):
-    return realimag2wv(x, hop, fac)
+    raise RuntimeError("Use realimag2wv(x, hop_size, fac, alpha_rescale, beta_rescale) explicitly.")
 
 def overlap_and_add(signal, frame_step):
 
@@ -216,7 +274,7 @@ def power2db(power, ref_value=1.0, amin=1e-10):
     log_spec -= 10.0 * torch.log10(torch.maximum(torch.tensor(amin), torch.tensor(ref_value)))
     return log_spec
 
-def create_melmat(hop=256, mel_bins=256, device=None):
+def create_melmat(hop=256, mel_bins=256, sample_rate=48000, device=None):
     # Lazy import to avoid hard dependency at import-time
     import torchaudio
     if device is None:

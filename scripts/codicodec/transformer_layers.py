@@ -57,14 +57,15 @@ class LayerNorm(nn.LayerNorm):
 
 
 class Feedforward(nn.Module):
-    def __init__(self, dim, mlp_mult=4, dropout=0.):
+    def __init__(self, dim, mlp_mult=4, dropout=0., zero_output_init=True):
         super().__init__()
         inner_dim = int(dim * mlp_mult)
         dim_out = dim
 
         self.activation = nn.SiLU()
         self.to_mlp = init(nn.Linear(dim, inner_dim, bias=False))
-        self.to_out = zero_init(nn.Linear(inner_dim//2, dim_out, bias=False))
+        out = nn.Linear(inner_dim//2, dim_out, bias=False)
+        self.to_out = zero_init(out) if zero_output_init else init(out)
         self.do = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -77,7 +78,7 @@ class Feedforward(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads = 4, group_together = 1, training_length = None, causal=False, pos_emb='none'):
+    def __init__(self, embed_dim, num_heads = 4, group_together = 1, training_length = None, causal=False, pos_emb='none', zero_output_init=True):
         super().__init__()
         self.dim_head = embed_dim//num_heads
         self.heads = num_heads
@@ -91,7 +92,8 @@ class MultiHeadAttention(nn.Module):
         self.group_together = group_together
 
         self.to_qkv = init(nn.Linear(embed_dim, hidden_dim*3, bias=False))
-        self.to_out = zero_init(nn.Linear(hidden_dim, embed_dim, bias=False))
+        out = nn.Linear(hidden_dim, embed_dim, bias=False)
+        self.to_out = zero_init(out) if zero_output_init else init(out)
         self.q_norm = RMSNorm(self.dim_head, affine=True)
         self.k_norm = RMSNorm(self.dim_head, affine=True)
 
@@ -123,19 +125,14 @@ class AdaptiveNorm(nn.Module):
                 cond = cond.unsqueeze(-2)
             if x.shape[0]>cond.shape[0]:
                 cond = cond.repeat(x.shape[0]//cond.shape[0],1,1)
-            if cond.shape[-2]==2:
-                cond1, cond2 = torch.chunk(cond, 2, dim=-2)
-                x1, x2 = torch.chunk(x, 2, dim=-2)
-                x = torch.cat((x1 * (1.+cond1), x2 * (1.+cond2)), dim=-2)
-            else:
-                x = x * (1.+cond)
+            x = x * (1.+cond)
         return x
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads=4, cond_dim=None, group_together=1, training_length=None, causal=False, pos_emb='none'):
+    def __init__(self, dim, heads=4, cond_dim=None, group_together=1, training_length=None, causal=False, pos_emb='none', zero_output_init=True):
         super(Attention, self).__init__()
-        self.mha = MultiHeadAttention(embed_dim=dim, num_heads=heads, group_together=group_together, training_length=training_length, causal=causal, pos_emb=pos_emb)
+        self.mha = MultiHeadAttention(embed_dim=dim, num_heads=heads, group_together=group_together, training_length=training_length, causal=causal, pos_emb=pos_emb, zero_output_init=zero_output_init)
         self.norm = AdaptiveNorm(dim, cond_dim)
 
     def forward(self, x, cond=None, num_groups=None, attn_mask=None):
@@ -146,9 +143,9 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dim, mlp_mult=4, cond_dim=None, dropout=0.):
+    def __init__(self, dim, mlp_mult=4, cond_dim=None, dropout=0., zero_output_init=True):
         super(MLP, self).__init__()
-        self.ff = Feedforward(dim=dim, mlp_mult=mlp_mult, dropout=dropout)
+        self.ff = Feedforward(dim=dim, mlp_mult=mlp_mult, dropout=dropout, zero_output_init=zero_output_init)
         self.norm = AdaptiveNorm(dim, cond_dim)
 
     def forward(self, x, cond=None, attn_mask=None):
@@ -159,10 +156,10 @@ class MLP(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    def __init__(self, dim, heads=4, mlp_mult=4, cond_dim=None, group_together=1, training_length=None, causal=False, pos_emb='none', dropout=0.):
+    def __init__(self, dim, heads=4, mlp_mult=4, cond_dim=None, group_together=1, training_length=None, causal=False, pos_emb='none', dropout=0., zero_output_init=True):
         super(AttentionBlock, self).__init__()
-        self.attn = Attention(dim, heads, cond_dim=cond_dim, group_together=group_together, training_length=training_length, causal=causal, pos_emb=pos_emb)
-        self.mlp = MLP(dim, mlp_mult, cond_dim=cond_dim, dropout=dropout)
+        self.attn = Attention(dim, heads, cond_dim=cond_dim, group_together=group_together, training_length=training_length, causal=causal, pos_emb=pos_emb, zero_output_init=zero_output_init)
+        self.mlp = MLP(dim, mlp_mult, cond_dim=cond_dim, dropout=dropout, zero_output_init=zero_output_init)
 
     def forward(self, x, cond=None, num_groups=None, attn_mask=None):
         x = self.attn(x, cond, num_groups=num_groups, attn_mask=attn_mask)

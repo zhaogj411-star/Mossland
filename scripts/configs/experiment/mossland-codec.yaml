@@ -5,7 +5,7 @@ checkpoint_monitor: loss/total
 tags: ["audioCodec", "mossland-codec", "mossland-rvq", "0p5b-balanced", "stereo", "multi-task"]
 seed: 42
 resume_from_ckpt: null
-pretrain_ckpt_path: null
+pretrain_ckpt_path: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/ckpt/mosslandcodec0623/checkpoint.ckpt
 checkpoint_every_n_train_steps: 2000
 
 trainer:
@@ -70,7 +70,7 @@ model:
   bottleneck_base_channels: 1024
   num_bottleneck_layers: 9
   quantizer_num_quantizers: 32
-  quantizer_codebook_size: 1024
+  quantizer_codebook_size: 4096
   quantizer_codebook_dim: null
   quantizer_dropout: 1.0
   quantizer_decay: 0.99
@@ -127,7 +127,7 @@ wrapper:
   rvq_commitment_weight: 0.0
   rvq_codebook_weight: 0.0
   rvq_hidden_recon_weight: 0.0
-  rvq_latent_train_prob: 0.1
+  rvq_latent_train_prob: 0.2
   rvq_detach_encoder: true
   train_n_quantizers: null
   train_n_quantizers_choices: [8, 16, 32]

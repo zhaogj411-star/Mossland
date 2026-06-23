@@ -8,9 +8,6 @@ from .hparams import *
 from .hparams_inference import *
 from .utils import is_path, distribute, is_integer, download_model
 from .models import UNet
-from .audio import to_representation_encoder, to_waveform
-
-
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -38,10 +35,6 @@ class EncoderDecoder:
         self.get_models()
         self.latents_per_timestep = num_latents
         self.bottleneck_channels = bottleneck_channels
-
-        # live decoding
-        self.past_spec = None
-        self.past_latents = None
 
     def latents2dim(self, latents, desired_channels=64):
         """Reshape latent channels to desired size while preserving content."""
@@ -72,22 +65,22 @@ class EncoderDecoder:
         if max_batch_size is None:
             max_batch_size = max_batch_size_encode
         if discrete:
-            # For discrete encoding, always quantize before extracting codebook indices
-            latents = encode_audio_inference(path_or_audio, self, max_batch_size, device=self.device, dont_quantize=False, preprocess_on_gpu=preprocess_on_gpu, fix_batch_size=fix_batch_size)
-            return self.gen.fsq.codes_to_indexes(latents)
-        # Continuous or quantized continuous encoding
-        latents = encode_audio_inference(path_or_audio, self, max_batch_size, device=self.device, dont_quantize=True, preprocess_on_gpu=preprocess_on_gpu, fix_batch_size=fix_batch_size)
+            raise RuntimeError(
+                "Discrete RVQ export is not supported by this legacy inference wrapper. "
+                "Use UNet.quantize_representation() from the Hydra model path."
+            )
+        # Continuous encoding. encoder_forward already bounds the latent to (-1, 1)
+        # via an internal tanh (replacing the old FSQ.bound), so no external atanh
+        # rescale is applied here -- the returned latent is the model's native latent.
+        latents = encode_audio_inference(path_or_audio, self, max_batch_size, device=self.device, preprocess_on_gpu=preprocess_on_gpu, fix_batch_size=fix_batch_size)
         # reshape to desired channels
         out = self.latents2dim(latents, desired_channels=desired_channels)
-        # apply inverse tanh transform and rescale for continuous latents
-        out = torch.atanh(out) / sigma_rescale
         return out
 
-    def decode(self, latent, mode='parallel', max_batch_size=None, denoising_steps=None, time_prompt=None, preprocess_on_gpu=True):
+    def decode(self, latent, mode='full', max_batch_size=None, denoising_steps=None, preprocess_on_gpu=True):
         '''
         latent: numpy array of latents to decode with shape [audio_channels, dim, length]
         max_batch_size: maximum inference batch size for decoding: tune it depending on the available GPU memory
-        time_prompt: noise level added to past token
 
         Returns numpy array of decoded waveform with shape [waveform_samples, audio_channels]
         '''
@@ -96,40 +89,19 @@ class EncoderDecoder:
         if max_batch_size is None:
             max_batch_size = max_batch_size_decode
         if discrete:
-            latents = self.gen.fsq.indexes_to_codes(latent)
+            latents = self.gen.latent_from_codes(latent.to(self.device) if torch.is_tensor(latent) else torch.from_numpy(latent).to(self.device))
         else:
-            # invert rescaling and transform for continuous latents
-            inv = latent * sigma_rescale
-            inv = torch.tanh(inv)
-            latents = self.dim2latents(inv)
-        return decode_latent_inference(latents, self, mode, max_batch_size, denoising_steps=denoising_steps, time_prompt=time_prompt, device=self.device, preprocess_on_gpu=preprocess_on_gpu)
+            # Continuous latent is already the model's native (-1, 1) latent; just
+            # regroup channels back to the decoder's [.., num_latents, bottleneck] layout.
+            inv = latent if torch.is_tensor(latent) else torch.from_numpy(latent)
+            latents = self.dim2latents(inv.to(self.device))
+        return decode_latent_inference(latents, self, mode, max_batch_size, denoising_steps=denoising_steps, device=self.device, preprocess_on_gpu=preprocess_on_gpu)
 
     def reset(self):
-        """Clear internal live-decoding buffers."""
-        self.past_spec = None
-        self.past_latents = None
+        """Compatibility no-op; stateful autoregressive decoding is not used."""
 
-    def decode_next(self, latents, max_batch_size=None, denoising_steps=None, discrete=False, time_prompt=None, preprocess_on_gpu=True):
-        '''
-        latents: numpy array of latents to decode with shape [audio_channels, dim, length]
-        max_batch_size: maximum inference batch size for decoding: tune it depending on the available GPU memory
-        time_prompt: noise level added to past token
-
-        Returns numpy array of decoded waveform with shape [waveform_samples, audio_channels]
-        '''
-        if max_batch_size is None:
-            max_batch_size = max_batch_size_decode
-        if discrete:
-            latents = self.gen.fsq.indexes_to_codes(latents)
-        else:
-            # invert rescaling and transform for continuous latents
-            inv = latents * sigma_rescale
-            inv = torch.tanh(inv)
-            latents = self.dim2latents(inv)
-        wv, past_spec, past_latents = decode_next_latent_inference(latents, self, max_batch_size, denoising_steps=denoising_steps, time_prompt=time_prompt, device=self.device, preprocess_on_gpu=preprocess_on_gpu)
-        self.past_spec = past_spec
-        self.past_latents = past_latents
-        return wv
+    def decode_next(self, latents, max_batch_size=None, denoising_steps=None, discrete=False, preprocess_on_gpu=True):
+        raise RuntimeError("decode_next is no longer supported; pass the full latent sequence to decode().")
 
 
 
@@ -144,7 +116,7 @@ class EncoderDecoder:
 # Returns:
 #   latent: compressed latent representation with shape [audio_channels, latent_length, dim]
 @torch.no_grad()
-def encode_audio_inference(audio_path, trainer, max_batch_size_encode, device='cuda', dont_quantize=False, preprocess_on_gpu=False, fix_batch_size=False):
+def encode_audio_inference(audio_path, trainer, max_batch_size_encode, device='cuda', preprocess_on_gpu=False, fix_batch_size=False):
     trainer.gen = trainer.gen.to(device)
     trainer.gen.eval()
     squeeze_batch_dimensions = False
@@ -182,7 +154,7 @@ def encode_audio_inference(audio_path, trainer, max_batch_size_encode, device='c
         raise ValueError("Input audio shape is not valid. It should be [waveform_samples], [audio_channels, waveform_samples] or [batch_size, audio_channels, waveform_samples]")
 
     batch_size = audio.shape[0]
-    repr_encoder = to_representation_encoder(audio)
+    repr_encoder = trainer.gen.audio_processor.to_representation_encoder(audio)
     del audio
 
     if repr_encoder.shape[-1]%spec_length!=0:
@@ -200,10 +172,10 @@ def encode_audio_inference(audio_path, trainer, max_batch_size_encode, device='c
         if repr_encoder.shape[0]%max_batch_size_encode!=0:
             rem = torch.zeros(max_batch_size_encode-(repr_encoder.shape[0]%max_batch_size_encode), *repr_encoder.shape[1:], device=repr_encoder.device, dtype=repr_encoder.dtype)
             repr_encoder = torch.cat([repr_encoder, rem], 0)
-        latent = distribute(trainer.gen.encoder_forward_fast, repr_encoder, max_batch_size_encode, device, dont_quantize=dont_quantize)
+        latent = distribute(trainer.gen.encoder_forward_fast, repr_encoder, max_batch_size_encode, device)
         latent = latent[:original_batch_size]
     else:
-        latent = distribute(trainer.gen.encoder_forward, repr_encoder, max_batch_size_encode, device, dont_quantize=dont_quantize)
+        latent = distribute(trainer.gen.encoder_forward, repr_encoder, max_batch_size_encode, device)
 
     del repr_encoder
     # split samples
@@ -223,7 +195,7 @@ def encode_audio_inference(audio_path, trainer, max_batch_size_encode, device='c
 # Returns:
 #   audio: numpy array of decoded waveform with shape [waveform_samples, audio_channels]
 @torch.no_grad()
-def decode_latent_inference(latent, trainer, mode, max_batch_size_decode, denoising_steps=None, device='cuda', preprocess_on_gpu=False, time_prompt=None):
+def decode_latent_inference(latent, trainer, mode='full', max_batch_size_decode=None, denoising_steps=None, device='cuda', preprocess_on_gpu=False):
     trainer.gen = trainer.gen.to(device)
     trainer.gen.eval()
     # check if latent is numpy array, then convert to tensor
@@ -239,64 +211,14 @@ def decode_latent_inference(latent, trainer, mode, max_batch_size_decode, denois
         squeeze_batch_dimensions = True
         latent = torch.unsqueeze(latent, 0)
     latent = torch.cat(torch.unbind(latent, -3), -2)
+    if mode not in (None, "full", "parallel"):
+        raise ValueError(f"mode={mode!r} is not supported; use the full-sequence decode interface.")
     original_length = (latent.shape[-2]//num_latents)*spec_length
-    if mode=='parallel':
-        # pad latents
-        if latent.shape[-2]%(num_latents*2)!=0:
-            pad = (num_latents*2)-(latent.shape[-2]%(num_latents*2))
-            latent = F.pad(latent, (0,0,0,pad))
-
-    if mode=='parallel':
-        repr = trainer.gen.decode_parallel(latent, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode)
-    elif mode=='autoregressive':
-        repr = trainer.gen.decode_autoregressive(latent, time_prompt=time_prompt, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode)
-    else:
-        raise ValueError(f"Mode must be either 'parallel' or 'autoregressive', but got {mode}")
+    repr = trainer.gen.decode(latent, denoising_steps=denoising_steps)
     if not preprocess_on_gpu:
         repr = repr.cpu()
-    repr = to_waveform(repr[..., :original_length]).cpu()
+    repr = trainer.gen.audio_processor.to_waveform(repr[..., :original_length]).cpu()
     del latent
     if squeeze_batch_dimensions:
         repr = repr.squeeze(0)
     return repr
-
-
-# Decode next latent representation for inference
-# Parameters:
-#   latent: compressed latent representation with shape [batch_size, 1, latents_per_timestep, dim] or [1, latents_per_timestep, dim] or [latents_per_timestep, dim]
-#   model: trained consistency model
-#   device: device to run the model on
-# Returns:
-#   audio: numpy array of decoded waveform with shape [waveform_samples, audio_channels]
-@torch.no_grad()
-def decode_next_latent_inference(latent, trainer, max_batch_size_decode, denoising_steps=None, device='cuda', preprocess_on_gpu=False, time_prompt=None):
-    trainer.gen = trainer.gen.to(device)
-    trainer.gen.eval()
-    # check if latent is numpy array, then convert to tensor
-    if isinstance(latent, np.ndarray):
-        latent = torch.from_numpy(latent)
-    if preprocess_on_gpu:
-        latent = latent.to(device)
-    else:
-        latent = latent.cpu()
-    squeeze_batch_dimensions = False
-    # if latents has only 2 dimensions, add a first dimension as axis 0
-    if len(latent.shape)==2:
-        latent = torch.unsqueeze(latent, 0)
-    # if latent has only 3 dimensions, add a third dimension as axis 0
-    if len(latent.shape)==3:
-        squeeze_batch_dimensions = True
-        latent = torch.unsqueeze(latent, 0)
-    latent = torch.squeeze(latent, -3)
-    # equivalent way of doing the above line in a more elegant way:
-    # latent = latent.permute(0, 2, 1, 3).reshape(latent.shape[0], -1, latent.shape[-1])
-
-    repr = trainer.gen.decode_autoregressive_step(latent, past_repr=trainer.past_spec, past_latents=trainer.past_latents, time_prompt=time_prompt, denoising_steps=denoising_steps, max_batch_size=max_batch_size_decode)
-    past_spec = repr[..., -spec_length:]
-    if not preprocess_on_gpu:
-        repr = repr.cpu()
-    repr = to_waveform(repr).cpu()
-    repr = repr[..., spec_length*hop:-(fac-1)*hop]
-    if squeeze_batch_dimensions:
-        repr = repr.squeeze(0)
-    return repr, past_spec, latent

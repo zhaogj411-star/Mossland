@@ -8,13 +8,11 @@ seed = 42                                                                   # se
 
 stereo = True                                                               # if True, train on stereo data, if False, train on mono data
 
-default_time_prompt = 0.4                                                   # default time prompt for inference
-default_denoising_steps_parallel = 5                                        # default number of denoising steps for inference
-default_denoising_steps_ar = 2                                              # default number of denoising steps for inference
+default_denoising_steps = 5                                                 # default number of denoising steps for inference
 
 # stft spectrogram params
-hop = 512*2
-fac = 4//2
+hop = 960
+fac = 2
 if stereo:
     stft_channels = 4
 else:
@@ -37,10 +35,10 @@ num_layers = 12                                                             # nu
 num_layers_encoder = num_layers                                             # number of layers in encoder
 cond_channels = 512                                                         # dimension of time embedding
 
-num_latents = 128                                                           # number of latents per patch of data_length//2 tokens
+num_latents = 128                                                           # latents per chunk; stacked = num_latents*bottleneck_channels = 512-dim
 num_more_latents = 8                                                        # number of additional latents per patch of data_length//2 tokens, to be discarded
-fsq_levels = [11, 11, 11, 11]
-bottleneck_channels = len(fsq_levels)
+bottleneck_channels = 4
+rvq_dim = 64                                                                # chunk stack (512) reshaped to 512/rvq_dim tokens; RVQ codes on rvq_dim
 
 # frontend params
 frontend_base_channels = 64
@@ -53,7 +51,6 @@ spec_length = 32
 downsample_ratio = (4**frontend_freq_downsample_list.count(0))*(4**frontend_freq_downsample_list.count(1))*(2**frontend_freq_downsample_list.count(2))*(2**frontend_freq_downsample_list.count(3))
 data_length = (hop*(fac//2)*spec_length)//downsample_ratio                  # sequence length of data used for training
 
-sigma_min = 0.002                                                           # minimum sigma
-sigma_max = 80.                                                             # maximum sigma
-sigma_data = 0.5                                                            # sigma for data
-rho = 7.                                                                    # rho parameter for sigma schedule
+sigma_data = 0.333                                                          # data std (TrigFlow prior scale), measured on NETEASE_SPIDER representation (hop=960,fac=2)
+t_min = 0.006                                                               # TrigFlow time lower bound (near clean data)
+t_max = 1.5666                                                              # TrigFlow time upper bound (near pure noise, ~pi/2)

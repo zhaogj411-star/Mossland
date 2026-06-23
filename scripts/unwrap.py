@@ -25,6 +25,66 @@ from scripts.trainer_utils import (
 log = RankedLogger(__name__, rank_zero_only=True)
 
 
+def _partial_codebook_copy(target: torch.Tensor, source: torch.Tensor) -> torch.Tensor | None:
+    if target.ndim != source.ndim or target.ndim < 2:
+        return None
+    if target.shape[0] != source.shape[0]:
+        return None
+    if target.shape[2:] != source.shape[2:]:
+        return None
+    copied = target.detach().clone()
+    n = min(target.shape[1], source.shape[1])
+    copied[:, :n, ...] = source[:, :n, ...].to(device=copied.device, dtype=copied.dtype)
+    return copied
+
+
+def _load_state_dict_flexible(module: torch.nn.Module, state_dict: dict, strict: bool):
+    if strict:
+        return module.load_state_dict(state_dict, strict=True)
+
+    current = module.state_dict()
+    filtered = {}
+    copied_partial = []
+    skipped_shape = []
+
+    for key, value in state_dict.items():
+        if key not in current:
+            filtered[key] = value
+            continue
+        target = current[key]
+        if tuple(value.shape) == tuple(target.shape):
+            filtered[key] = value
+            continue
+        partial = _partial_codebook_copy(target, value)
+        if partial is not None:
+            filtered[key] = partial
+            copied_partial.append(
+                f"{key}: {tuple(value.shape)} -> {tuple(target.shape)}"
+            )
+        else:
+            skipped_shape.append(
+                f"{key}: {tuple(value.shape)} -> {tuple(target.shape)}"
+            )
+
+    incompatible = module.load_state_dict(filtered, strict=False)
+    if copied_partial:
+        log.info(
+            "Partially copied mismatched codebook tensors; old entries copied, "
+            f"new entries kept from fresh init: {len(copied_partial)}"
+        )
+        for item in copied_partial[:20]:
+            log.info(f"  partial_copy {item}")
+        if len(copied_partial) > 20:
+            log.info(f"  ... {len(copied_partial) - 20} more partial copies")
+    if skipped_shape:
+        log.info(f"Skipped shape-mismatched tensors: {len(skipped_shape)}")
+        for item in skipped_shape[:20]:
+            log.info(f"  skip_shape {item}")
+        if len(skipped_shape) > 20:
+            log.info(f"  ... {len(skipped_shape) - 20} more skipped shape mismatches")
+    return incompatible
+
+
 @hydra.main(version_base=None, config_path="./configs", config_name="unwrap_model")
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)  # resolve all string interpolations
@@ -54,7 +114,8 @@ def main(cfg: DictConfig):
             experiment_ckpt_path,
             map_location=training_wrapper.device,
         )
-        incompatible = training_wrapper.load_state_dict(
+        incompatible = _load_state_dict_flexible(
+            training_wrapper,
             checkpoint["state_dict"],
             strict=load_strict,
         )
@@ -73,7 +134,8 @@ def main(cfg: DictConfig):
             experiment_ckpt_path,
             map_location=training_wrapper.device,
         )
-        incompatible = training_wrapper.load_state_dict(
+        incompatible = _load_state_dict_flexible(
+            training_wrapper,
             checkpoint["module"],
             strict=load_strict,
         )

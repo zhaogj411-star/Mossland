@@ -26,13 +26,13 @@ data:
   dataset:
     _target_: scripts.data.datasets.SampleDataset
     dirs:
-      - /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER
-    sample_size: 900000
+      -/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER
+    sample_size: 44100
     sample_rate: 44100
     random_crop: true
     num_channels: 2
     crops_per_file: 1
-    index_file: /inspire/qb-ilm2/project/embodied-multimodality/public/zhaoguojie/data/NETEASE_SPIDER/index_audio.list
+    index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/raw/NETEASE_SPIDER/index_audio.list
     audio_cache_dir: null
     max_duration_seconds: 300
     length: 10000000

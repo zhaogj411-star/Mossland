@@ -16,7 +16,7 @@ export SOURCE_PREFIX=${SOURCE_PREFIX:-qz_oss2:embodied-multimodality/public/Sona
 export OUTPUT_PREFIX=${OUTPUT_PREFIX:-qz_oss2:embodied-multimodality/public/Sonata/data/source_seperation/${DATASET_NAME}}
 export DATES=${DATES:-}
 
-export RUN_DIR=${RUN_DIR:-${REPO_ROOT}/tmp/prepare_${DATASET_NAME,,}_seperation}
+export RUN_DIR=${RUN_DIR:-${REPO_ROOT}/data_processing_tmp/prepare_${DATASET_NAME,,}_seperation}
 export INPUTS_FILE=${INPUTS_FILE:-${RUN_DIR}/inputs.txt}
 export CONFIG_FILE=${CONFIG_FILE:-${RUN_DIR}/config.json}
 export QUEUE_ROOT=${QUEUE_ROOT:-${RUN_DIR}/local_queue}

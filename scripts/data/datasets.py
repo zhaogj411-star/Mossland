@@ -8,6 +8,7 @@ import random
 import subprocess
 
 import time
+import julius
 import torch
 import torchaudio
 from torch.utils.data import DataLoader, random_split
@@ -297,6 +298,7 @@ class SampleDataset(torch.utils.data.Dataset):
         self.max_duration_seconds = _normalize_max_duration_seconds(max_duration_seconds)
         self._duration_limit_cache: dict[str, bool] = {}
         self._duration_seconds_cache: dict[str, float | None] = {}
+        self._resamplers: dict[tuple[int, int], julius.ResampleFrac] = {}
         if audio_cache_dir is not None:
             os.makedirs(audio_cache_dir, exist_ok=True)
             self.audio_cache_dir = audio_cache_dir
@@ -413,6 +415,18 @@ class SampleDataset(torch.utils.data.Dataset):
         self._duration_limit_cache[filename] = exceeds
         return exceeds
 
+    def _resample_audio(self, audio: torch.Tensor, in_sr: int) -> torch.Tensor:
+        in_sr = int(in_sr)
+        out_sr = int(self.sr)
+        if in_sr == out_sr:
+            return audio
+        key = (in_sr, out_sr)
+        resampler = self._resamplers.get(key)
+        if resampler is None:
+            resampler = julius.ResampleFrac(in_sr, out_sr)
+            self._resamplers[key] = resampler
+        return resampler(audio)
+
     def load_file(self, filename):
         ext = filename.split(".")[-1]
         basename = path.basename(filename)
@@ -435,8 +449,7 @@ class SampleDataset(torch.utils.data.Dataset):
             audio, in_sr = torchaudio.load(filename)
 
         if in_sr != self.sr:
-            resample_tf = T.Resample(in_sr, self.sr)
-            audio = resample_tf(audio)
+            audio = self._resample_audio(audio, int(in_sr))
 
         if self.audio_cache_dir is not None:
             torch.save(audio.cpu().detach(), target_path)

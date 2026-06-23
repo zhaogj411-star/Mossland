@@ -1,0 +1,135 @@
+# @package _global_
+
+project_name: codicodec
+checkpoint_monitor: loss
+tags: ["audioCodec", "codicodec", "rvq", "rvq64", "12p5hz", "mossland-training"]
+seed: 42
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 2000
+
+trainer:
+  devices: [0, 1, 2, 3, 4, 5, 6, 7]
+  strategy: ddp_find_unused_parameters_true # encoder/pre_decoder/decoder skip their in/out projection layers (skip_input/output_layer=True), so those params never get grad -> plain ddp errors
+  precision: bf16-mixed
+  max_steps: 800000
+  max_epochs: 10000000
+  accumulate_grad_batches: 1
+  # gradient_clip_val: null
+  # gradient_clip_algorithm: null
+  log_every_n_steps: 10
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: null
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.data.datasets.PTDataset
+    folder_path: tmp/codicodec_overfit100_pt
+    files_list: tmp/codicodec_overfit100_pt/files.list
+    mainkey: audio
+    infokeys: []
+    target_length: 93120 # 3 STFT-aligned chunks at hop=960,spec_length=32 (~1.94s); 8 tokens/chunk -> 12.5 Hz token rate
+    nums: 10000000
+    sub_length: null
+    use_multiple_start: false
+    if_random_crop: false
+  pin_memory: true
+  val_split: null 
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 8
+  prefetch_factor: 2
+
+model:
+  _target_: scripts.codicodec.models.UNet
+  sample_rate: 48000
+  stereo: true
+  mixed_precision: false
+  audio_processor:
+    _target_: scripts.codicodec.audio.AudioProcessor
+    alpha_rescale: 0.65
+    beta_rescale: 0.34
+    hop_size: 960
+    fac: 2
+    center_pad: false
+  dim: 512
+  head_dim: 128
+  heads: 4
+  mlp_mult: 4
+  pos_emb: learned
+  num_layers: 12
+  num_layers_encoder: 12
+  cond_channels: 512
+  num_latents: 128
+  num_more_latents: 8
+  bottleneck_channels: 4
+  latent_tanh_scale: 0.3 # avoid early tanh saturation so summary latents carry input-specific information before RVQ
+  frontend_base_channels: 64
+  frontend_multipliers_list: [1, 2, 4, 8]
+  frontend_layers_list: [3, 3, 3, 1]
+  frontend_encoder_layers_list: [3, 3, 3, 1]
+  frontend_freq_downsample_list: [0, 1, 0]
+  spec_length: 32
+  sigma_data: 0.333
+  t_min: 0.006
+  t_max: 1.5666
+  default_denoising_steps: 2
+  quantizer_num_quantizers: 32
+  quantizer_codebook_size: 4096
+  quantizer_codebook_dim: null
+  rvq_dim: 64
+  quantizer_dropout: 1.0
+  quantizer_decay: 0.99
+  quantizer_kmeans_init: true
+  quantizer_kmeans_iters: 10
+  quantizer_threshold_ema_dead_code: 2
+
+wrapper:
+  _target_: scripts.codicodec.wrapper.CoDiCodecTrainingWrapper
+  use_ema: true
+  ema_beta: 0.9999
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  optimizer_name: adamw
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 100
+  lr_schedule_total_steps: 800000
+  final_learning_rate: 1e-6
+  random_mix_prob: 0.0
+  train_num_chunks: null # null -> auto-derive chunk count from each sample's length (only sample_size needs maintaining)
+  rvq_commitment_weight: 0.0
+  rvq_codebook_weight: 0.0
+  rvq_hidden_recon_weight: 0.0
+  rvq_latent_train_prob: 0.25
+  rvq_detach_encoder: false
+  train_n_quantizers: null
+  train_n_quantizers_choices: [8, 16, 32]
+  latent_time_shift_prob: 1.0
+  latent_time_shift_max_tokens: null # null -> when active, sample a nonzero shift in [1, rvq_tokens_per_chunk-1] on the 64-d token axis before decode/loss
+  latent_time_shift_loss_weight: 1.0 # train aligned full chunks plus an extra shifted-boundary loss; shift is a constraint, not a replacement target
+  p_mean: -1.1
+  p_std: 2.0
+  tangent_warmup_steps: 10000
+  tangent_norm_const: 0.1
+  adaptive_weight_dim: 128
+  use_jvp_tangent: true
+  consistency_weight: 1.0
+  direct_denoise_weight: 1.0e-4
+  direct_denoise_mode: trigflow_noise
+  direct_detach_encoder: false
+  decode_initial_state: noise
+  fail_on_nonfinite: true
+  fail_on_nonfinite_grad: false
+
+callbacks:
+  demo_callback:
+    _target_: scripts.codicodec.wrapper.CoDiCodecTrainingCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 2
+    demo_every: 1000
+    sample_rate: 48000
+    demo_n_quantizers_choices: [8, 16, 32]
+    use_ema: true
+    silence_seconds: 0.25
+    demo_seconds: 5.0
