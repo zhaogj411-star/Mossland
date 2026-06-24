@@ -4,15 +4,22 @@ import argparse
 import csv
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import torch
 
 from .audio_io import load_audio_segment, reference_path_for_item
 from .fad_backends import FadBackend, build_fad_backend, summarize_fad
-from .infer import build_task_input, generate_prediction, load_mossland_model
+from .infer import build_task_input
 from .manifest import EvalItem, read_manifest, write_jsonl
 from .metrics import aggregate_metric_rows, pair_metrics
+from .model_adapters import (
+    AdapterContext,
+    generate_adapter_prediction,
+    load_prediction_adapter,
+    parse_adapter_config,
+)
 
 
 def write_summary_tables(summary: dict[str, dict[str, float]], output_dir: Path) -> None:
@@ -125,9 +132,19 @@ def run(args: argparse.Namespace) -> None:
         model_name=args.fad_model,
         cache_dir=args.fad_cache_dir,
     )
-    model = None
-    if args.checkpoint_dir:
-        model = load_mossland_model(args.checkpoint_dir, device=args.device)
+    adapter_options = parse_adapter_config(args.adapter_config)
+    if args.quantized:
+        adapter_options["quantized"] = True
+    adapter_context = AdapterContext(
+        device=args.device,
+        output_dir=output_dir / "predictions",
+        options=adapter_options,
+    )
+    prediction_adapter = load_prediction_adapter(
+        checkpoint_dir=args.checkpoint_dir,
+        adapter_target=args.adapter_target,
+        context=adapter_context,
+    )
 
     evaluated = []
     total = len(items)
@@ -141,15 +158,15 @@ def run(args: argparse.Namespace) -> None:
             flush=True,
         )
     for index, item in enumerate(items, start=1):
-        if model is not None:
-            prediction_path = generate_prediction(
-                model,
+        if prediction_adapter is not None:
+            prediction_path = generate_adapter_prediction(
+                prediction_adapter,
                 item,
                 output_dir=output_dir / "predictions",
-                quantize=args.quantized,
+                context=adapter_context,
                 overwrite=args.overwrite_predictions,
             )
-            item = EvalItem(**{**item.__dict__, "prediction_path": prediction_path})
+            item = replace(item, prediction_path=prediction_path)
         evaluated.append(
             evaluate_item(
                 item,
@@ -184,6 +201,19 @@ def main() -> None:
     parser.add_argument("--shard-id", type=int, default=0, help="Zero-based shard id for --num-shards.")
     parser.add_argument("--progress-every", type=int, default=10, help="Print progress every N rows; <=0 disables progress.")
     parser.add_argument("--checkpoint-dir", default=None, help="Optional Mossland checkpoint directory.")
+    parser.add_argument(
+        "--adapter-target",
+        default=None,
+        help=(
+            "Optional custom prediction adapter as 'module:object'. The object can be an adapter "
+            "instance with predict() or a factory returning one."
+        ),
+    )
+    parser.add_argument(
+        "--adapter-config",
+        default=None,
+        help="Optional JSON string or JSON file passed to custom adapters as context.options.",
+    )
     parser.add_argument("--device", default=None, help="Torch device for checkpoint inference.")
     parser.add_argument(
         "--metrics-device",

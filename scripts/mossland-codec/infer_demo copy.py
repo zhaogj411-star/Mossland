@@ -4,34 +4,30 @@ import argparse
 import importlib
 import os
 import sys
-from pathlib import Path
 
 import torch
 import torchaudio
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.fspath(REPO_ROOT))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, REPO_ROOT)
 
 EncoderDecoder = importlib.import_module("scripts.mossland-codec.inference").EncoderDecoder
 
 
-DEFAULT_CKPT = REPO_ROOT / "ckpt/mosslandcodec0617"
-DEFAULT_INPUT_AUDIO = Path(
-    "/inspire/sj-ssd3/project/embodied-multimodality/public/"
-    "Sonata/data/source_seperation/NETEASE_SPIDER/audio/20260528/"
-    "2030433496/mixture.mp3"
-)
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "tmp/mossland-codec-infer"
+DEFAULT_CKPT = os.path.join(REPO_ROOT, "ckpt/mosslandcodec_rvq_0624_step36000")
+# DEFAULT_CKPT = os.path.join(REPO_ROOT, "ckpt/mosslandcodec_rvq_0623")
+DEFAULT_INPUT_AUDIO ='/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/data/Ummet Ozcan,FrogMonster 蛙蛙,Karra - Remember The Summer (feat. Karra).mp3'
+DEFAULT_OUTPUT_DIR = os.path.join(REPO_ROOT, "tmp/mossland-codec-infer-shift")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Mossland codec continuous/RVQ demo inference."
     )
-    parser.add_argument("--ckpt", default=os.fspath(DEFAULT_CKPT))
-    parser.add_argument("--input-audio", default=os.fspath(DEFAULT_INPUT_AUDIO))
-    parser.add_argument("--output-dir", default=os.fspath(DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--ckpt", default=DEFAULT_CKPT)
+    parser.add_argument("--input-audio", default=DEFAULT_INPUT_AUDIO)
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
         "--task-id",
         default="reconstruct",
@@ -47,9 +43,9 @@ def parse_args() -> argparse.Namespace:
         ],
     )
     parser.add_argument("--start-seconds", type=float, default=0.0)
-    parser.add_argument("--duration-seconds", type=float, default=30.0)
+    parser.add_argument("--duration-seconds", type=float, default=120.0)
     parser.add_argument("--mode", choices=["parallel", "autoregressive"], default="parallel")
-    parser.add_argument("--denoising-steps", type=int, default=None)
+    parser.add_argument("--denoising-steps", type=int, default=8)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--format", default="mp3", choices=["mp3", "wav"])
     return parser.parse_args()
@@ -78,12 +74,12 @@ def load_audio(
     return audio
 
 
-def save_audio(path: Path, audio: torch.Tensor, sample_rate: int, audio_format: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save_audio(path: str, audio: torch.Tensor, sample_rate: int, audio_format: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     if audio.ndim == 3 and audio.shape[0] == 1:
         audio = audio.squeeze(0)
     torchaudio.save(
-        os.fspath(path),
+        path,
         audio.float().cpu(),
         sample_rate,
         format=audio_format,
@@ -107,7 +103,7 @@ def decode_and_save(
     print_shape(f"{name}_generated_audio", generated)
     suffix = args.format
     save_audio(
-        Path(args.output_dir) / f"{args.task_id}_{name}.{suffix}",
+        os.path.join(args.output_dir, f"{args.task_id}_{name}.{suffix}"),
         generated,
         codec.gen.sample_rate,
         args.format,
@@ -132,21 +128,19 @@ def main() -> None:
     print(f"output_dir: {args.output_dir}")
     print_shape("source_audio", audio)
     save_audio(
-        Path(args.output_dir) / f"{args.task_id}_source.{args.format}",
+        os.path.join(args.output_dir, f"{args.task_id}_source.{args.format}"),
         audio,
         codec.gen.sample_rate,
         args.format,
     )
 
     continuous_latents = codec.encode(audio, discrete=False, preprocess_on_gpu=True)
+    # continuous_latents = continuous_latents[:,3:-5]
     print_shape("continuous_latents", continuous_latents)
     decode_and_save(codec, "continuous", continuous_latents, args)
 
-    if codec.gen.bottleneck_type not in {"packed_rvq", "causal_rvq"}:
-        raise RuntimeError(
-            f"rvq demo requires bottleneck_type='packed_rvq' or 'causal_rvq', "
-            f"got {codec.gen.bottleneck_type!r}"
-        )
+    if codec.gen.rvq is None:
+        raise RuntimeError("rvq demo requires RVQ to be enabled")
 
     rates = (8, 16, 32) if codec.gen.rvq_num_quantizers <= 32 else (16, 128)
     for n_quantizers in rates:
@@ -156,9 +150,18 @@ def main() -> None:
             preprocess_on_gpu=True,
             n_quantizers=n_quantizers,
         )
+        # codes = codes[:,3:-5]
         print_shape(f"rvq{n_quantizers}_codes", codes)
         decode_and_save(codec, f"rvq{n_quantizers}", codes, args)
 
+    # for start in [96, 97, 98, 99, 100, 101, 102, 103]:
+    #     continuous_latents = codec.encode(audio, discrete=False, preprocess_on_gpu=True)
+    #     continuous_latents = continuous_latents[..., start:start + 48]
+    #     decode_and_save(codec, f"continuous_start_from_time{start}", continuous_latents, args)
+
+    #     codes = codec.encode(audio, discrete=True, preprocess_on_gpu=True, n_quantizers=32)
+    #     codes = codes[..., start:start + 48]
+    #     decode_and_save(codec, f"rvq32_start_from_time{start}", codes, args)
 
 if __name__ == "__main__":
     main()

@@ -100,12 +100,11 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         lr_warmup_steps: int = 10_000,
         lr_schedule_total_steps: int = 2_000_000,
         random_mix_prob: float = 0.0,
-        fsq_dropout_prob: float = 0.75,
-        rvq_commitment_weight: float = 1.0,
-        rvq_codebook_weight: float = 1.0,
-        rvq_distill_weight: float = 1.0,
-        rvq_latent_train_prob: float = 0.1,
-        rvq_detach_encoder: bool = True,
+        rvq_commitment_weight: float = 0.0,
+        rvq_codebook_weight: float = 0.0,
+        rvq_distill_weight: float = 0.0,
+        rvq_latent_train_prob: float = 0.25,
+        rvq_detach_encoder: bool = False,
         train_n_quantizers: int | None = None,
         train_n_quantizers_choices: list[int] | None = None,
         rvq_log_n_quantizers_choices: list[int] | None = None,
@@ -118,6 +117,9 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         lognormal_std: float = 2.0,
         consistency_loss_delta: float = 0.00054,
         consistency_min_sigma_delta: float = 0.001,
+        train_input_chunks: int = 2,
+        latent_time_shift_prob: float = 0.0,
+        latent_time_shift_max_tokens: int | None = None,
         index_data_every_step: int | None = None,
         rvq_sync_debug_every_step: int | None = None,
         fail_on_nonfinite: bool = True,
@@ -143,7 +145,6 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         self.lr_schedule = lr_schedule
         self.lr_schedule_total_steps = int(lr_schedule_total_steps)
         self.random_mix_prob = float(random_mix_prob)
-        self.fsq_dropout_prob = float(fsq_dropout_prob)
         self.rvq_commitment_weight = float(rvq_commitment_weight)
         self.rvq_codebook_weight = float(rvq_codebook_weight)
         self.rvq_distill_weight = float(rvq_distill_weight)
@@ -165,6 +166,17 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         self.lognormal_std = float(lognormal_std)
         self.consistency_loss_delta = float(consistency_loss_delta)
         self.consistency_min_sigma_delta = float(consistency_min_sigma_delta)
+        self.train_input_chunks = int(train_input_chunks)
+        if self.train_input_chunks < 2:
+            raise ValueError("train_input_chunks must be >= 2")
+        self.latent_time_shift_prob = float(latent_time_shift_prob)
+        if not 0.0 <= self.latent_time_shift_prob <= 1.0:
+            raise ValueError("latent_time_shift_prob must be in [0, 1]")
+        if latent_time_shift_max_tokens is None:
+            latent_time_shift_max_tokens = max(0, self.model.rvq_tokens_per_chunk - 1)
+        self.latent_time_shift_max_tokens = int(latent_time_shift_max_tokens)
+        if self.latent_time_shift_max_tokens < 0:
+            raise ValueError("latent_time_shift_max_tokens must be >= 0")
         self.index_data_every_step = _normalize_positive_int_or_none(
             index_data_every_step,
             "index_data_every_step",
@@ -307,13 +319,6 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         left = sigma_left[:, None].expand(-1, self.model.spec_length)
         right = sigma_right[:, None].expand(-1, self.model.spec_length)
         return torch.cat([left, right], dim=1)
-
-    def _fsq_dropout_active(self, device: torch.device) -> bool:
-        if self.fsq_dropout_prob <= 0.0:
-            return False
-        if self.fsq_dropout_prob >= 1.0:
-            return True
-        return bool(torch.rand((), device=device) < self.fsq_dropout_prob)
 
     def _sample_n_quantizers(self) -> int | None:
         if self.train_n_quantizers_choices:
@@ -556,13 +561,79 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         }
         return loss, metrics, predicted, target
 
+    def _select_latent_time_shift(self, latents: torch.Tensor) -> int:
+        tokens_per_chunk = self.model.rvq_tokens_per_chunk
+        total_tokens = (latents.shape[-2] // self.model.num_latents) * tokens_per_chunk
+        target_tokens = 2 * tokens_per_chunk
+        max_shift = max(0, total_tokens - target_tokens)
+        max_shift = min(max_shift, self.latent_time_shift_max_tokens)
+        if max_shift <= 0 or self.latent_time_shift_prob <= 0.0:
+            return 0
+        if self.latent_time_shift_prob < 1.0 and torch.rand((), device=latents.device) >= self.latent_time_shift_prob:
+            return 0
+        return int(torch.randint(0, max_shift + 1, (), device=latents.device).item())
+
+    def _apply_latent_time_shift(
+        self,
+        representation: torch.Tensor,
+        latents: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """Crop a 2-chunk window with an optional sub-chunk latent time offset."""
+        tokens_per_chunk = self.model.rvq_tokens_per_chunk
+        if self.model.spec_length % tokens_per_chunk != 0:
+            raise ValueError(
+                f"spec_length={self.model.spec_length} must be divisible by "
+                f"rvq_tokens_per_chunk={tokens_per_chunk}"
+            )
+        frames_per_token = self.model.spec_length // tokens_per_chunk
+        shift_tokens = self._select_latent_time_shift(latents)
+        shift_frames = shift_tokens * frames_per_token
+        target_tokens = 2 * tokens_per_chunk
+        target_frames = 2 * self.model.spec_length
+
+        packed = self.model.pack_rvq_tokens(latents)
+        if packed.shape[-1] < shift_tokens + target_tokens:
+            raise ValueError(
+                f"not enough latent tokens for 2-chunk shifted window: "
+                f"tokens={packed.shape[-1]}, shift={shift_tokens}, need={target_tokens}"
+            )
+        if representation.shape[-1] < shift_frames + target_frames:
+            raise ValueError(
+                f"not enough representation frames for 2-chunk shifted window: "
+                f"frames={representation.shape[-1]}, shift={shift_frames}, need={target_frames}"
+            )
+
+        packed = packed[..., shift_tokens : shift_tokens + target_tokens]
+        shifted_latents = self.model.unpack_rvq_tokens(packed)
+        shifted_representation = representation[
+            ..., shift_frames : shift_frames + target_frames
+        ]
+        metrics = {
+            "latent/time_shift_tokens": torch.tensor(
+                float(shift_tokens),
+                device=representation.device,
+            ),
+            "latent/time_shift_frames": torch.tensor(
+                float(shift_frames),
+                device=representation.device,
+            ),
+            "latent/time_shift_applied": torch.tensor(
+                1.0 if shift_tokens > 0 else 0.0,
+                device=representation.device,
+            ),
+        }
+        return shifted_representation, shifted_latents, metrics
+
     def training_step(self, batch, batch_idx):
         self._log_current_lr()
         payload, info = batch
         task = MosslandTaskBatch.from_payload(payload)
 
-        src = self.model.prepare_audio_batch(task.src)
-        target_audio = self.model.prepare_audio_batch(task.target)
+        src = self.model.prepare_audio_batch(task.src, num_chunks=self.train_input_chunks)
+        target_audio = self.model.prepare_audio_batch(
+            task.target,
+            num_chunks=self.train_input_chunks,
+        )
         src, target_audio, mix_applied = self._maybe_random_mix(
             src,
             target_audio,
@@ -579,25 +650,37 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         rvq_encoded = None
         rvq_loss = src_representation.new_zeros(())
         n_quantizers = None
-        latent_source = "continuous"
-        if self.model.bottleneck_type in {"packed_rvq", "causal_rvq"}:
-            n_quantizers = None
+        source_discrete = src_representation.new_zeros(())
+        if self.model.rvq is not None:
+            n_quantizers = self._sample_n_quantizers()
             rvq_encoded = self.model.encode_bottleneck(
                 src_representation,
                 quantize=True,
-                detach_encoder=True,
+                detach_encoder=self.rvq_detach_encoder,
                 n_quantizers=n_quantizers,
             )
             latents = rvq_encoded.continuous
-            latent_source = "continuous"
+            rvq_latent_train_prob = max(0.0, min(1.0, self.rvq_latent_train_prob))
+            if rvq_latent_train_prob > 0.0:
+                batch_size = rvq_encoded.continuous.shape[0]
+                discrete_mask = (
+                    torch.ones(batch_size, dtype=torch.bool, device=rvq_encoded.continuous.device)
+                    if rvq_latent_train_prob >= 1.0
+                    else torch.rand(batch_size, device=rvq_encoded.continuous.device) < rvq_latent_train_prob
+                )
+                source_discrete = discrete_mask.float().mean()
+                discrete_mask = discrete_mask.view(batch_size, *([1] * (rvq_encoded.continuous.ndim - 1)))
+                latents = torch.where(discrete_mask, rvq_encoded.latents, rvq_encoded.continuous)
         else:
-            dont_quantize = self._fsq_dropout_active(src_representation.device)
             encoded = self.model.encode_bottleneck(
                 src_representation,
-                quantize=not dont_quantize,
+                quantize=False,
             )
             latents = encoded.latents
-            latent_source = "continuous" if dont_quantize else "fsq"
+        target_representation, latents, shift_metrics = self._apply_latent_time_shift(
+            target_representation,
+            latents,
+        )
         self._assert_finite("latents", latents, info)
         features = self.model.pre_decoder_forward(latents)
         for idx, feature in enumerate(features):
@@ -647,14 +730,14 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
             )
         self.log(
             "latent/source_discrete",
-            torch.tensor(float(latent_source == "discrete"), device=loss.device),
+            source_discrete.to(device=loss.device),
             prog_bar=False,
             on_step=True,
             on_epoch=False,
             sync_dist=False,
         )
         self._log_tensor_stats("latent/selected", latents)
-        if self.model.bottleneck_type in {"packed_rvq", "causal_rvq"} and rvq_encoded is not None:
+        if self.model.rvq is not None and rvq_encoded is not None:
             if n_quantizers is not None:
                 self.log("rvq/n_quantizers", float(n_quantizers), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
             self._log_tensor_stats("latent/continuous", rvq_encoded.continuous)
@@ -668,16 +751,9 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
             self._log_rvq_rate_errors(rvq_encoded.packed_continuous)
             self.log("rvq/codebook_loss", rvq_encoded.codebook_loss.detach(), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
             self.log("rvq/distill_loss", rvq_encoded.distill_loss.detach(), prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
-        else:
-            self.log(
-                "latent/fsq_dropout",
-                torch.tensor(float(latent_source == "continuous"), device=loss.device),
-                prog_bar=False,
-                on_step=True,
-                on_epoch=False,
-                sync_dist=False,
-            )
         for name, value in metrics.items():
+            self.log(name, value, prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+        for name, value in shift_metrics.items():
             self.log(name, value, prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
         return loss
 
@@ -761,7 +837,7 @@ class MosslandCodecTrainingCallback(pl.Callback):
             model.train(was_training)
 
     def _demo_quantizer_rates(self, model) -> list[int | None]:
-        if getattr(model, "bottleneck_type", None) not in {"packed_rvq", "causal_rvq"}:
+        if getattr(model, "rvq", None) is None:
             return [None]
         if self.demo_n_quantizers is not None:
             return [int(self.demo_n_quantizers)]

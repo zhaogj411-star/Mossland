@@ -30,97 +30,12 @@ class BottleneckOutput:
     packed_quantized: torch.Tensor | None = None
     quantized: bool = False
     n_quantizers: int | None = None
+    rvq_tokens_per_chunk: int | None = None
 
 
 def waveform_length_for_stft_frames(num_frames: int, hop: int, fac: int) -> int:
     frame_length = fac * hop
     return frame_length + hop * (num_frames - 1)
-
-
-def round_ste(z):
-    """Round with straight through gradients."""
-    zhat = torch.round(z)
-    return z + (zhat - z).detach()
-
-class FSQ(nn.Module):
-    """Quantizer."""
-
-    def __init__(self, levels: list[int], eps: float = 1e-3):
-        super().__init__()
-        self._levels = torch.tensor(levels)
-        self._eps = eps
-        self._basis = torch.cat([torch.tensor([1]), torch.cumprod(self._levels[:-1], dim=0)])
-        self._basis = self._basis.to(torch.int64)
-
-        self.register_buffer('_levels_tensor', self._levels, persistent=False)
-        self.register_buffer('_basis_tensor', self._basis, persistent=False)
-
-        self._implicit_codebook = self.indexes_to_codes(torch.arange(self.codebook_size))
-
-    @property
-    def num_dimensions(self) -> int:
-        """Number of dimensions expected from inputs."""
-        return len(self._levels)
-
-    @property
-    def codebook_size(self) -> int:
-        """Size of the codebook."""
-        return self._levels.prod().item()
-
-    @property
-    def codebook(self):
-        """Returns the implicit codebook. Shape (prod(levels), num_dimensions)."""
-        return self._implicit_codebook
-
-    def bound(self, z: torch.Tensor) -> torch.Tensor:
-        """Bound `z`, an array of shape (..., d)."""
-        half_l = (self._levels_tensor - 1) * (1 - self._eps) / 2
-        offset = torch.where(self._levels_tensor % 2 == 1, 0., 0.5)
-        shift = torch.tan(offset / half_l)
-        return torch.tanh(z + shift) * half_l - offset
-
-    def quantize(self, z: torch.Tensor) -> torch.Tensor:
-        """Quantizes z, returns quantized zhat, same shape as z."""
-        quantized = round_ste(self.bound(z))
-
-        # Renormalize to [-1, 1].
-        half_width = self._levels_tensor // 2
-        return quantized / half_width
-
-    def dont_quantize(self, z: torch.Tensor) -> torch.Tensor:
-        """Does not quantize z, returns unquantized zhat, same shape as z."""
-        not_quantized = self.bound(z)
-
-        # Renormalize to [-1, 1].
-        half_width = self._levels_tensor // 2
-        return not_quantized / half_width
-
-    def round_continuous(self, z: torch.Tensor) -> torch.Tensor:
-        half_width = self._levels_tensor.to(z.device) // 2
-        z = z * half_width
-        zhat = torch.round(z)
-        return zhat / half_width
-
-    def _scale_and_shift(self, zhat_normalized):
-        # Scale and shift to range [0, ..., L-1]
-        half_width = self._levels_tensor.to(zhat_normalized.device) // 2
-        return (zhat_normalized * half_width) + half_width
-
-    def _scale_and_shift_inverse(self, zhat):
-        half_width = self._levels_tensor.to(zhat.device) // 2
-        return (zhat - half_width) / half_width
-
-    def codes_to_indexes(self, zhat: torch.Tensor) -> torch.Tensor:
-        """Converts a `code` to an index in the codebook."""
-        assert zhat.shape[-1] == self.num_dimensions
-        zhat = self._scale_and_shift(zhat)
-        return (zhat * self._basis_tensor.to(zhat.device)).sum(dim=-1).round().to(torch.int32)
-
-    def indexes_to_codes(self, indices: torch.Tensor) -> torch.Tensor:
-        """Inverse of `indexes_to_codes`."""
-        indices = indices.unsqueeze(-1)
-        codes_non_centered = torch.div(indices, self._basis_tensor.to(indices.device), rounding_mode='floor') % self._levels_tensor.to(indices.device)
-        return self._scale_and_shift_inverse(codes_non_centered)
 
 
 def exists(val):
@@ -479,80 +394,6 @@ class LocalCausalTransformerBlock(nn.Module):
         return x
 
 
-class CausalLatentEncoder(nn.Module):
-    """Map frontend `[freq,time]` tokens to ordered continuous codec tokens."""
-
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        num_tokens: int,
-        input_frames_per_chunk: int,
-        hidden_dim: int,
-        heads: int,
-        num_layers: int,
-        mlp_mult: int = 4,
-        context: int | None = None,
-    ):
-        super().__init__()
-        self.num_tokens = int(num_tokens)
-        self.input_frames_per_chunk = int(input_frames_per_chunk)
-        self.input_proj = init(nn.Linear(input_dim, hidden_dim))
-        self.layers = nn.ModuleList(
-            [
-                LocalCausalTransformerBlock(
-                    dim=hidden_dim,
-                    heads=heads,
-                    mlp_mult=mlp_mult,
-                    context=context,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.output_proj = init(nn.Linear(hidden_dim, output_dim))
-
-    def _output_tokens(self, input_frames: int) -> int:
-        numerator = input_frames * self.num_tokens
-        if numerator % self.input_frames_per_chunk != 0:
-            raise ValueError(
-                f"causal_rvq input frames {input_frames} cannot be mapped to "
-                f"{self.num_tokens} tokens per {self.input_frames_per_chunk} frames"
-            )
-        return numerator // self.input_frames_per_chunk
-
-    @staticmethod
-    def _sinusoidal_positions(length: int, dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        positions = torch.arange(length, device=device, dtype=torch.float32).unsqueeze(1)
-        half_dim = dim // 2
-        if half_dim == 0:
-            return torch.zeros(1, length, dim, device=device, dtype=dtype)
-        div_term = torch.exp(
-            torch.arange(half_dim, device=device, dtype=torch.float32)
-            * (-math.log(10000.0) / max(half_dim - 1, 1))
-        )
-        emb = torch.cat([torch.sin(positions * div_term), torch.cos(positions * div_term)], dim=1)
-        if emb.shape[1] < dim:
-            emb = F.pad(emb, (0, dim - emb.shape[1]))
-        return emb[:, :dim].unsqueeze(0).to(dtype=dtype)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output_tokens = self._output_tokens(x.shape[1])
-        x = self.input_proj(x)
-        if x.shape[1] != output_tokens:
-            x = F.interpolate(
-                x.transpose(1, 2),
-                size=output_tokens,
-                mode="linear",
-                align_corners=False,
-            ).transpose(1, 2)
-        x = x + self._sinusoidal_positions(x.shape[1], x.shape[2], x.device, x.dtype)
-        for layer in self.layers:
-            x = layer(x)
-        x = self.norm(x)
-        return torch.tanh(self.output_proj(x))
-
-
 class DownFrontend(nn.Module):
     def __init__(
         self,
@@ -735,7 +576,7 @@ class MosslandCodecTransformer(nn.Module):
     Provides an encoder that maps spectrogram patches to latents and a decoder
     that reconstructs spectrograms conditioned on noise level and Mossland task
     metadata. Supports both parallel and autoregressive decoding schedules and
-    a finite scalar quantizer (FSQ) bottleneck.
+    RVQ bottlenecks.
     """
     def __init__(
         self,
@@ -759,9 +600,6 @@ class MosslandCodecTransformer(nn.Module):
         cond_channels: int = 512,
         num_latents: int = 128,
         num_more_latents: int = 8,
-        fsq_levels: list[int] | None = None,
-        use_fsq: bool = True,
-        bottleneck_type: str | None = None,
         bottleneck_channels: int | None = None,
         rvq_num_quantizers: int = 0,
         rvq_codebook_size: int = 1024,
@@ -773,7 +611,8 @@ class MosslandCodecTransformer(nn.Module):
         rvq_kmeans_init: bool = True,
         rvq_kmeans_iters: int = 10,
         rvq_threshold_ema_dead_code: int = 2,
-        causal_rvq_context: int | None = 50,
+        rvq_token_dim: int = 64,
+        rvq_tokens_per_chunk: int | None = None,
         frontend_base_channels: int = 64,
         frontend_multipliers_list: list[int] | None = None,
         frontend_layers_list: list[int] | None = None,
@@ -794,8 +633,6 @@ class MosslandCodecTransformer(nn.Module):
         super().__init__()
         if torch_compile_cache_dir is not None:
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = torch_compile_cache_dir
-        if fsq_levels is None:
-            fsq_levels = [11, 11, 11, 11]
         if frontend_multipliers_list is None:
             frontend_multipliers_list = [1, 2, 4, dim // frontend_base_channels]
         if frontend_layers_list is None:
@@ -834,13 +671,6 @@ class MosslandCodecTransformer(nn.Module):
         self.cond_channels = int(cond_channels)
         self.num_latents = int(num_latents)
         self.num_more_latents = int(num_more_latents)
-        self.fsq_levels = list(fsq_levels)
-        if bottleneck_type is None:
-            bottleneck_type = "fsq" if use_fsq else "none"
-        self.bottleneck_type = str(bottleneck_type).lower()
-        if self.bottleneck_type not in {"fsq", "packed_rvq", "causal_rvq", "none"}:
-            raise ValueError(f"Unsupported bottleneck_type={bottleneck_type!r}")
-        self.use_fsq = self.bottleneck_type == "fsq"
         self.rvq_num_quantizers = int(rvq_num_quantizers)
         self.rvq_codebook_size = int(rvq_codebook_size)
         self.rvq_codebook_dim = rvq_codebook_dim
@@ -851,14 +681,44 @@ class MosslandCodecTransformer(nn.Module):
         self.rvq_kmeans_init = bool(rvq_kmeans_init)
         self.rvq_kmeans_iters = int(rvq_kmeans_iters)
         self.rvq_threshold_ema_dead_code = int(rvq_threshold_ema_dead_code)
-        self.causal_rvq_context = None if causal_rvq_context is None else int(causal_rvq_context)
         if bottleneck_channels is None:
-            bottleneck_channels = len(self.fsq_levels)
+            bottleneck_channels = 4
         self.bottleneck_channels = int(bottleneck_channels)
-        if self.use_fsq and self.bottleneck_channels != len(self.fsq_levels):
-            raise ValueError("FSQ bottleneck_channels must match len(fsq_levels)")
-        if self.bottleneck_type in {"packed_rvq", "causal_rvq"} and self.rvq_num_quantizers <= 0:
-            raise ValueError(f"{self.bottleneck_type} requires rvq_num_quantizers > 0")
+        self.rvq_token_dim = int(rvq_token_dim)
+        if self.rvq_token_dim <= 0:
+            raise ValueError(f"rvq_token_dim must be positive, got {self.rvq_token_dim}")
+        total_chunk_dim = self.num_latents * self.bottleneck_channels
+        if rvq_tokens_per_chunk is None:
+            if total_chunk_dim % self.rvq_token_dim != 0:
+                raise ValueError(
+                    f"num_latents*bottleneck_channels={total_chunk_dim} must be divisible "
+                    f"by rvq_token_dim={self.rvq_token_dim}"
+                )
+            rvq_tokens_per_chunk = total_chunk_dim // self.rvq_token_dim
+        self.rvq_tokens_per_chunk = int(rvq_tokens_per_chunk)
+        if self.rvq_tokens_per_chunk <= 0:
+            raise ValueError(
+                f"rvq_tokens_per_chunk must be positive, got {self.rvq_tokens_per_chunk}"
+            )
+        if total_chunk_dim != self.rvq_tokens_per_chunk * self.rvq_token_dim:
+            raise ValueError(
+                "RVQ tokenization must preserve each chunk exactly: "
+                f"num_latents*bottleneck_channels={total_chunk_dim}, "
+                f"rvq_tokens_per_chunk*rvq_token_dim="
+                f"{self.rvq_tokens_per_chunk * self.rvq_token_dim}"
+            )
+        if self.rvq_token_dim % self.bottleneck_channels != 0:
+            raise ValueError(
+                f"rvq_token_dim={self.rvq_token_dim} must be divisible by "
+                f"bottleneck_channels={self.bottleneck_channels}"
+            )
+        self.rvq_latents_per_token = self.rvq_token_dim // self.bottleneck_channels
+        if self.rvq_tokens_per_chunk * self.rvq_latents_per_token != self.num_latents:
+            raise ValueError(
+                f"rvq_tokens_per_chunk={self.rvq_tokens_per_chunk} and "
+                f"rvq_latents_per_token={self.rvq_latents_per_token} do not cover "
+                f"num_latents={self.num_latents}"
+            )
         self.frontend_base_channels = int(frontend_base_channels)
         self.frontend_multipliers_list = list(frontend_multipliers_list)
         self.frontend_layers_list = list(frontend_layers_list)
@@ -921,27 +781,6 @@ class MosslandCodecTransformer(nn.Module):
         else:
             self.more_latents_encoder = None
         self.encoder = Transformer(self.dim, self.bottleneck_channels, training_length=self.data_length+self.num_latents+self.num_more_latents, dim=self.dim, num_layers=self.num_layers_encoder, heads=self.heads, mlp_mult=self.mlp_mult, pos_emb=self.pos_emb)
-        self.causal_token_encoder = (
-            CausalLatentEncoder(
-                input_dim=self.dim,
-                output_dim=self.bottleneck_channels,
-                num_tokens=self.num_latents,
-                input_frames_per_chunk=self.time_dim,
-                hidden_dim=self.dim,
-                heads=self.heads,
-                num_layers=self.num_layers_encoder,
-                mlp_mult=self.mlp_mult,
-                context=self.causal_rvq_context,
-            )
-            if self.bottleneck_type == "causal_rvq"
-            else None
-        )
-        if self.bottleneck_type == "causal_rvq":
-            self.latents.requires_grad_(False)
-            if self.more_latents_encoder is not None:
-                self.more_latents_encoder.requires_grad_(False)
-            self.encoder.requires_grad_(False)
-
         self.lat2patch_pre_decoder = init(nn.Linear(self.bottleneck_channels, self.dim))
         if self.num_more_latents>0:
             self.more_latents_pre_decoder = nn.Parameter(scale*torch.randn(1, self.num_more_latents, self.dim), requires_grad=True)
@@ -985,33 +824,19 @@ class MosslandCodecTransformer(nn.Module):
             cond_dim=self.cond_channels,
         ).to(memory_format=torch.channels_last)
 
-        self.fsq = (
-            FSQ(levels=self.fsq_levels)
-            if self.bottleneck_type in {"fsq", "packed_rvq"}
-            else None
-        )
-        self.packed_bottleneck_channels = self.num_latents * self.bottleneck_channels
-        self.rvq = (
-            ResidualVectorQuantize(
-                input_dim=(
-                    self.packed_bottleneck_channels
-                    if self.bottleneck_type == "packed_rvq"
-                    else self.bottleneck_channels
-                ),
+        self.rvq = None
+        if self.rvq_num_quantizers > 0:
+            self.rvq = ResidualVectorQuantize(
+                input_dim=self.rvq_token_dim,
                 n_codebooks=self.rvq_num_quantizers,
                 codebook_size=self.rvq_codebook_size,
                 codebook_dim=self.rvq_codebook_dim,
                 quantizer_dropout=self.rvq_quantizer_dropout,
-                quantizer_dropout_cutoff_index=self.rvq_quantizer_dropout_cutoff_index,
-                quantizer_dropout_multiple_of=self.rvq_quantizer_dropout_multiple_of,
                 decay=self.rvq_decay,
                 kmeans_init=self.rvq_kmeans_init,
                 kmeans_iters=self.rvq_kmeans_iters,
                 threshold_ema_dead_code=self.rvq_threshold_ema_dead_code,
             )
-            if self.bottleneck_type in {"packed_rvq", "causal_rvq"}
-            else None
-        )
 
     def get_attn_mask(self, x):
         """Generate attention mask for autoregressive decoding."""
@@ -1049,13 +874,16 @@ class MosslandCodecTransformer(nn.Module):
             beta_rescale=self.beta_rescale,
         )
 
-    def prepare_audio_batch(self, batch: torch.Tensor) -> torch.Tensor:
+    def prepare_audio_batch(self, batch: torch.Tensor, num_chunks: int = 2) -> torch.Tensor:
         batch = batch.to(next(self.parameters()).dtype)
         if not self.stereo:
             batch = batch.mean(dim=-2, keepdim=True)
 
+        num_chunks = int(num_chunks)
+        if num_chunks <= 0:
+            raise ValueError(f"num_chunks must be positive, got {num_chunks}")
         target_length = waveform_length_for_stft_frames(
-            2 * self.spec_length,
+            num_chunks * self.spec_length,
             hop=self.hop,
             fac=self.fac,
         )
@@ -1095,8 +923,14 @@ class MosslandCodecTransformer(nn.Module):
         waveform = self.to_waveform(generated[..., : representation.shape[-1]])
         return src.detach().cpu(), waveform.detach().cpu()
 
-    def pack_chunk_latents(self, latents: torch.Tensor) -> torch.Tensor:
-        """Pack 128 per-chunk summary slots into one vector timestep."""
+    def pack_rvq_tokens(self, latents: torch.Tensor) -> torch.Tensor:
+        """Stack per-chunk summary slots into 64-d RVQ tokens.
+
+        The Transformer keeps the original CoDiCodec-style latent layout
+        [B, chunks*num_latents, bottleneck_channels]. For the requested RVQ
+        layout, each chunk is reshaped into rvq_tokens_per_chunk tokens of
+        rvq_token_dim channels, e.g. 128*4 -> 8*64.
+        """
         if latents.shape[-2] % self.num_latents != 0:
             raise ValueError(
                 f"latents length {latents.shape[-2]} must be divisible by "
@@ -1108,26 +942,39 @@ class MosslandCodecTransformer(nn.Module):
                 f"expected bottleneck_channels={self.bottleneck_channels}, got {channels}"
             )
         num_chunks = total_latents // self.num_latents
-        latents = latents.reshape(batch, num_chunks, self.num_latents, channels)
-        return latents.permute(0, 2, 3, 1).reshape(
+        latents = latents.reshape(
             batch,
-            self.num_latents * channels,
             num_chunks,
+            self.rvq_tokens_per_chunk,
+            self.rvq_latents_per_token,
+            channels,
         )
+        return latents.reshape(
+            batch,
+            num_chunks * self.rvq_tokens_per_chunk,
+            self.rvq_token_dim,
+        ).transpose(1, 2).contiguous()
 
-    def unpack_chunk_latents(self, packed: torch.Tensor) -> torch.Tensor:
-        """Inverse of pack_chunk_latents()."""
-        batch, packed_channels, num_chunks = packed.shape
-        expected = self.num_latents * self.bottleneck_channels
-        if packed_channels != expected:
-            raise ValueError(f"expected packed channels {expected}, got {packed_channels}")
-        packed = packed.reshape(
+    def unpack_rvq_tokens(self, packed: torch.Tensor) -> torch.Tensor:
+        """Inverse of pack_rvq_tokens()."""
+        batch, packed_channels, total_tokens = packed.shape
+        if packed_channels != self.rvq_token_dim:
+            raise ValueError(
+                f"expected rvq_token_dim={self.rvq_token_dim}, got {packed_channels}"
+            )
+        if total_tokens % self.rvq_tokens_per_chunk != 0:
+            raise ValueError(
+                f"packed token length {total_tokens} must be divisible by "
+                f"rvq_tokens_per_chunk={self.rvq_tokens_per_chunk}"
+            )
+        num_chunks = total_tokens // self.rvq_tokens_per_chunk
+        return packed.transpose(1, 2).contiguous().reshape(
             batch,
-            self.num_latents,
-            self.bottleneck_channels,
             num_chunks,
-        )
-        return packed.permute(0, 3, 1, 2).reshape(
+            self.rvq_tokens_per_chunk,
+            self.rvq_latents_per_token,
+            self.bottleneck_channels,
+        ).reshape(
             batch,
             num_chunks * self.num_latents,
             self.bottleneck_channels,
@@ -1141,66 +988,28 @@ class MosslandCodecTransformer(nn.Module):
         n_quantizers: int | None = None,
         log_magnitude: bool = False,
     ) -> BottleneckOutput:
-        if self.bottleneck_type == "causal_rvq":
+        if self.rvq is not None:
             continuous = self.encoder_forward(
                 x,
                 dont_quantize=True,
                 log_magnitude=log_magnitude,
             )
+            packed_continuous = self.pack_rvq_tokens(continuous)
             if not quantize:
                 return BottleneckOutput(
                     latents=continuous,
                     continuous=continuous,
+                    packed_continuous=packed_continuous,
                     quantized=False,
+                    rvq_tokens_per_chunk=self.rvq_tokens_per_chunk,
                 )
-            quantizer_input = continuous.transpose(1, 2).contiguous()
-            if detach_encoder:
-                quantizer_input = quantizer_input.detach()
-            quantized_cf, codes, _rvq_aux_loss = self.rvq(
-                quantizer_input,
-                n_quantizers=n_quantizers,
-            )
-            quantized = quantized_cf.transpose(1, 2).contiguous()
-            quantization_error = F.mse_loss(
-                quantized.float(),
-                continuous.detach().float(),
-            )
-            zero = continuous.new_zeros(())
-            return BottleneckOutput(
-                latents=quantized,
-                continuous=continuous,
-                codes=codes,
-                projected_latents=quantized,
-                commitment_loss=quantization_error,
-                codebook_loss=zero,
-                distill_loss=zero,
-                packed_continuous=quantizer_input.detach(),
-                packed_quantized=quantized_cf,
-                quantized=True,
-                n_quantizers=n_quantizers,
-            )
-
-        if self.bottleneck_type == "packed_rvq":
-            continuous = self.encoder_forward(
-                x,
-                dont_quantize=True,
-                log_magnitude=log_magnitude,
-            )
-            if not quantize:
-                return BottleneckOutput(
-                    latents=continuous,
-                    continuous=continuous,
-                    packed_continuous=self.pack_chunk_latents(continuous),
-                    quantized=False,
-                )
-            packed_continuous = self.pack_chunk_latents(continuous)
             quantizer_input = packed_continuous.detach() if detach_encoder else packed_continuous
             (
                 packed_quantized,
                 codes,
                 _rvq_aux_loss,
             ) = self.rvq(quantizer_input, n_quantizers=n_quantizers)
-            quantized = self.unpack_chunk_latents(packed_quantized)
+            quantized = self.unpack_rvq_tokens(packed_quantized)
             quantization_error = F.mse_loss(
                 packed_quantized.float(),
                 packed_continuous.detach().float(),
@@ -1218,6 +1027,7 @@ class MosslandCodecTransformer(nn.Module):
                 packed_quantized=packed_quantized,
                 quantized=True,
                 n_quantizers=n_quantizers,
+                rvq_tokens_per_chunk=self.rvq_tokens_per_chunk,
             )
 
         latents = self.encoder_forward(
@@ -1228,19 +1038,15 @@ class MosslandCodecTransformer(nn.Module):
         return BottleneckOutput(
             latents=latents,
             continuous=latents,
-            quantized=quantize and self.fsq is not None,
+            quantized=False,
             n_quantizers=None,
         )
 
     def latent_from_codes(self, codes: torch.Tensor) -> torch.Tensor:
         if self.rvq is None:
-            if self.fsq is None:
-                raise RuntimeError("No discrete bottleneck is enabled")
-            return self.fsq.indexes_to_codes(codes)
+            raise RuntimeError("No RVQ bottleneck is enabled")
         packed_quantized, _ = self.rvq.from_codes(codes)
-        if self.bottleneck_type == "causal_rvq":
-            return packed_quantized.transpose(1, 2).contiguous()
-        return self.unpack_chunk_latents(packed_quantized)
+        return self.unpack_rvq_tokens(packed_quantized)
 
     def encode_latents_from_representation(
         self,
@@ -1271,7 +1077,7 @@ class MosslandCodecTransformer(nn.Module):
         )
         packed = encoded.packed_quantized if quantize else encoded.packed_continuous
         if packed is None:
-            packed = self.pack_chunk_latents(encoded.latents)
+            packed = self.pack_rvq_tokens(encoded.latents)
         return packed
 
     def encode_codes_from_representation(
@@ -1279,25 +1085,17 @@ class MosslandCodecTransformer(nn.Module):
         x: torch.Tensor,
         n_quantizers: int | None = None,
     ) -> torch.Tensor:
-        if self.rvq is not None and self.bottleneck_type == "packed_rvq":
+        if self.rvq is not None:
             continuous = self.encoder_forward(x, dont_quantize=True)
-            packed = self.pack_chunk_latents(continuous)
+            packed = self.pack_rvq_tokens(continuous)
             return self.rvq.encode_codes(packed, n_quantizers=n_quantizers)
-        if self.rvq is not None and self.bottleneck_type == "causal_rvq":
-            continuous = self.encoder_forward(x, dont_quantize=True)
-            return self.rvq.encode_codes(
-                continuous.transpose(1, 2).contiguous(),
-                n_quantizers=n_quantizers,
-            )
         encoded = self.encode_bottleneck(
             x,
             quantize=True,
             n_quantizers=n_quantizers,
         )
         if encoded.codes is None:
-            if self.fsq is None:
-                raise RuntimeError("No discrete bottleneck is enabled")
-            return self.fsq.codes_to_indexes(encoded.latents)
+            raise RuntimeError("No RVQ bottleneck is enabled")
         return encoded.codes
 
     def encoder_forward(self, x, dont_quantize=False, log_magnitude=False):
@@ -1312,33 +1110,16 @@ class MosslandCodecTransformer(nn.Module):
         """
         assert x.shape[-1]%self.spec_length==0, f'Input shape {x.shape[-1]} is not divisible by {self.spec_length}.'
         factor = None
-        if self.bottleneck_type != "causal_rvq" and x.shape[-1]>self.spec_length:
+        if x.shape[-1] > self.spec_length:
             x_ls = torch.split(x, self.spec_length, dim=-1)
             factor = len(x_ls)
             x = torch.cat(x_ls, dim=0)
         x = self.frontend_encoder_down(x, gain=self.gain_encoder, log_magnitude=log_magnitude)[0]
-        if self.bottleneck_type == "causal_rvq":
-            if self.causal_token_encoder is None:
-                raise RuntimeError("causal_rvq requires causal_token_encoder")
-            if x.shape[1] % self.freq_dim != 0:
-                raise ValueError(
-                    f"frontend token length {x.shape[1]} is not divisible by freq_dim={self.freq_dim}"
-                )
-            time_steps = x.shape[1] // self.freq_dim
-            x = x.reshape(x.shape[0], self.freq_dim, time_steps, self.dim)
-            x = x.mean(dim=1)
-            x = self.causal_token_encoder(x)
-            return x
         if self.more_latents_encoder is not None:
             x = self.encoder(x, torch.cat((self.latents.expand(x.shape[0], -1, -1), self.more_latents_encoder.expand(x.shape[0], -1, -1)), -2), return_latents=True, skip_input_layer=True, skip_output_layer=False, print_magnitudes=log_magnitude)[:, :self.num_latents]
         else:
             x = self.encoder(x, self.latents.expand(x.shape[0], -1, -1), return_latents=True, skip_input_layer=True, skip_output_layer=False, print_magnitudes=log_magnitude)[:, :self.num_latents]
-        if self.fsq is None:
-            pass
-        elif dont_quantize:
-            x = self.fsq.dont_quantize(x)
-        else:
-            x = self.fsq.quantize(x)
+        x = torch.tanh(x)
         if factor is not None:
             x = torch.cat(torch.chunk(x, factor, dim=0), dim=-2)
         return x
@@ -1348,33 +1129,16 @@ class MosslandCodecTransformer(nn.Module):
         """torch.compile-optimized variant of encoder_forward with same outputs."""
         assert x.shape[-1]%self.spec_length==0, f'Input shape {x.shape[-1]} is not divisible by {self.spec_length}.'
         factor = None
-        if self.bottleneck_type != "causal_rvq" and x.shape[-1]>self.spec_length:
+        if x.shape[-1] > self.spec_length:
             x_ls = torch.split(x, self.spec_length, dim=-1)
             factor = len(x_ls)
             x = torch.cat(x_ls, dim=0)
         x = self.frontend_encoder_down(x, gain=self.gain_encoder, log_magnitude=log_magnitude)[0]
-        if self.bottleneck_type == "causal_rvq":
-            if self.causal_token_encoder is None:
-                raise RuntimeError("causal_rvq requires causal_token_encoder")
-            if x.shape[1] % self.freq_dim != 0:
-                raise ValueError(
-                    f"frontend token length {x.shape[1]} is not divisible by freq_dim={self.freq_dim}"
-                )
-            time_steps = x.shape[1] // self.freq_dim
-            x = x.reshape(x.shape[0], self.freq_dim, time_steps, self.dim)
-            x = x.mean(dim=1)
-            x = self.causal_token_encoder(x)
-            return x
         if self.more_latents_encoder is not None:
             x = self.encoder(x, torch.cat((self.latents.expand(x.shape[0], -1, -1), self.more_latents_encoder.expand(x.shape[0], -1, -1)), -2), return_latents=True, skip_input_layer=True, skip_output_layer=False, print_magnitudes=log_magnitude)[:, :self.num_latents]
         else:
             x = self.encoder(x, self.latents.expand(x.shape[0], -1, -1), return_latents=True, skip_input_layer=True, skip_output_layer=False, print_magnitudes=log_magnitude)[:, :self.num_latents]
-        if self.fsq is None:
-            pass
-        elif dont_quantize:
-            x = self.fsq.dont_quantize(x)
-        else:
-            x = self.fsq.quantize(x)
+        x = torch.tanh(x)
         if factor is not None:
             x = torch.cat(torch.chunk(x, factor, dim=0), dim=-2)
         return x

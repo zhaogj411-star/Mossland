@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/envs/main_env/bin/python}"
-EXPERIMENT="${EXPERIMENT:-mossland-codec}"
+EXPERIMENT="${EXPERIMENT:-mossland-codec-0617-rvq64-recovered}"
 PET_NPROC_PER_NODE="${PET_NPROC_PER_NODE:-8}"
 PET_NNODES="${PET_NNODES:-1}"
 PET_NODE_RANK="${PET_NODE_RANK:-0}"

@@ -1,0 +1,170 @@
+# @package _global_
+# Reconstructed from git commit 9994ad8 plus ckpt/mosslandcodec0617_rvq64/config.yaml.
+# This is the recovered 0617 training YAML updated to the current rvq64 layout:
+# encoder summary [B,chunks*128,4] -> RVQ tokens [B,64,chunks*8], 32x4096 codebooks.
+
+project_name: mossland-codec-0617-rvq64
+checkpoint_monitor: loss/total
+tags:
+- audioCodec
+- mossland-codec
+- multi-task
+- recovered-0617
+- rvq64
+- packed-rvq
+seed: null
+resume_from_ckpt: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec-0617-rvq64/runs/2026-06-23_17-20-24/checkpoints/last.ckpt
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 2000
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.mossland-codec.tasks.MosslandTaskDataset
+    dataset:
+      _target_: scripts.data.datasets.PreparedSeparationDataset
+      dirs:
+      - /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER
+      sample_size: 99328
+      sample_rate: 44100
+      random_crop: true
+      num_channels: 2
+      strict: false
+      max_duration_seconds: 300
+      crops_per_file: 8
+      length: 10000000
+      index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER/index.list
+    active_tasks:
+    - reconstruct
+    - separate_vocals
+    - separate_accompaniment
+    - super_resolution
+    - mono_to_stereo
+    task_weights:
+      reconstruct: 6.0
+      separate_vocals: 1
+      separate_accompaniment: 1
+      super_resolution: 1
+      mono_to_stereo: 1
+    sample_rate: 44100
+    low_sample_rate:
+    - 8000
+    - 40000
+  pin_memory: true
+  val_split: null
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 6
+  prefetch_factor: 2
+trainer:
+  log_every_n_steps: 10
+model:
+  _target_: scripts.mossland-codec.models.MosslandCodecTransformer
+  mixed_precision: true
+  stereo: true
+  default_time_prompt: 0.4
+  default_denoising_steps_parallel: 5
+  default_denoising_steps_ar: 2
+  hop: 1024
+  fac: 2
+  sample_rate: 44100
+  alpha_rescale: 0.65
+  beta_rescale: 0.34
+  dim: 768
+  head_dim: 128
+  mlp_mult: 4
+  pos_emb: learned
+  num_layers: 22
+  num_layers_encoder: 22
+  cond_channels: 768
+  num_latents: 128
+  num_more_latents: 8
+  bottleneck_channels: 4
+  rvq_num_quantizers: 32
+  rvq_codebook_size: 4096
+  rvq_codebook_dim: null
+  rvq_quantizer_dropout: 1.0
+  rvq_decay: 0.99
+  rvq_kmeans_init: true
+  rvq_kmeans_iters: 10
+  rvq_threshold_ema_dead_code: 2
+  frontend_base_channels: 64
+  frontend_multipliers_list:
+  - 1
+  - 2
+  - 4
+  - 12
+  frontend_layers_list:
+  - 3
+  - 3
+  - 3
+  - 1
+  frontend_encoder_layers_list:
+  - 3
+  - 3
+  - 3
+  - 1
+  frontend_freq_downsample_list:
+  - 0
+  - 1
+  - 0
+  spec_length: 32
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  rho: 7.0
+  max_batch_size_encode: 64
+  max_batch_size_decode: 32
+  sigma_rescale: 0.8
+  rvq_token_dim: 64
+  rvq_tokens_per_chunk: 8
+wrapper:
+  _target_: scripts.mossland-codec.wrapper.MosslandCodecTrainingWrapper
+  use_ema: true
+  ema_beta: 0.9999
+  learning_rate: 5e-5
+  weight_decay: 0.0
+  optimizer_name: radam
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 10000
+  lr_schedule_total_steps: 1000000
+  consistency_step: 0.1
+  consistency_step_schedule: exponential
+  consistency_step_total_steps: 1000000
+  consistency_step_end_exp: 2.0
+  sigma_sampling: lognormal
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_loss_delta: 0.00054
+  consistency_min_sigma_delta: 0.001
+  train_input_chunks: 3
+  latent_time_shift_prob: 1.0
+  latent_time_shift_max_tokens: 7
+  index_data_every_step: null
+  fail_on_nonfinite: true
+  rvq_commitment_weight: 0.0
+  rvq_codebook_weight: 0.0
+  rvq_distill_weight: 0.0
+  rvq_latent_train_prob: 0.1
+  rvq_detach_encoder: true
+  train_n_quantizers: null
+  train_n_quantizers_choices:
+  - 8
+  - 16
+  - 32
+  rvq_log_n_quantizers_choices:
+  - 8
+  - 16
+  - 32
+callbacks:
+  demo_callback:
+    _target_: scripts.mossland-codec.wrapper.MosslandCodecTrainingCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 2
+    demo_every: 2000
+    sample_rate: 44100
+    use_ema: true
+    silence_seconds: 0.25
+    demo_n_quantizers_choices:
+    - 8
+    - 16
+    - 32

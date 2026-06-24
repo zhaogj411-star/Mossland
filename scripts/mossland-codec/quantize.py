@@ -10,9 +10,9 @@ from vector_quantize_pytorch import vector_quantize_pytorch as vq_backend
 class ResidualVectorQuantize(nn.Module):
     """Thin channel-first wrapper around lucidrains ResidualVQ.
 
-    The underlying codebook is EMA/kmeans style, not a directly optimized
-    nn.Embedding codebook. Inputs and outputs use the local codec convention
-    [B, C, T], while lucidrains uses [B, T, C].
+    Inputs and outputs use the local codec convention [B, C, T], while
+    lucidrains uses [B, T, C]. This matches scripts.mossland_codec's RVQ
+    behavior, with encode_codes kept for this legacy package's inference API.
     """
 
     def __init__(
@@ -98,6 +98,15 @@ class ResidualVectorQuantize(nn.Module):
         codes = self.vq.get_codes_from_indices(indices)
         codes_summed = reduce(codes, "q ... -> ...", "sum")
         return self.vq.project_out(codes_summed)
+
+    def encode_codes(self, z: torch.Tensor, n_quantizers: int | None = None) -> torch.Tensor:
+        if n_quantizers is not None and not (1 <= int(n_quantizers) <= self.n_codebooks):
+            raise ValueError(f"n_quantizers must be in [1, {self.n_codebooks}], got {n_quantizers}")
+        x = z.transpose(1, 2).contiguous()
+        _quantized, indices, _losses = self.vq(x)
+        if n_quantizers is not None:
+            indices = indices[..., : int(n_quantizers)]
+        return indices.transpose(1, 2).contiguous()
 
     def forward(self, z: torch.Tensor, n_quantizers: int | None = None):
         if n_quantizers is not None and not (1 <= int(n_quantizers) <= self.n_codebooks):

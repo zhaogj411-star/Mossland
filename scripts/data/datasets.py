@@ -924,7 +924,7 @@ class PreparedSeparationDataset(Dataset):
         self.index_wait_timeout_seconds = int(index_wait_timeout_seconds)
         self.length = _normalize_positive_int_or_none(length, "length")
         self._duration_limit_cache: dict[Path, bool] = {}
-        self.item_dirs: list[Path] = []
+        self.item_dirs: list[str] = []
         self.refresh_items()
 
     def refresh_items(self, rebuild_index: bool = False):
@@ -945,7 +945,7 @@ class PreparedSeparationDataset(Dataset):
                 scanned = self._load_or_build_index(root, index_path)
                 item_dirs.extend(scanned)
                 built_indexes += 1
-        self.item_dirs = sorted(set(item_dirs))
+        self.item_dirs = item_dirs
         if rebuild_index:
             self._duration_limit_cache.clear()
         if rebuild_index:
@@ -961,7 +961,7 @@ class PreparedSeparationDataset(Dataset):
     def rebuild_index(self):
         self.refresh_items(rebuild_index=True)
 
-    def _read_index(self, root: Path, index_path: Path) -> list[Path]:
+    def _read_index(self, root: Path, index_path: Path) -> list[str]:
         item_dirs = []
         try:
             lines = index_path.read_text(encoding="utf-8").splitlines()
@@ -969,27 +969,20 @@ class PreparedSeparationDataset(Dataset):
             return item_dirs
         for line in lines:
             value = line.strip()
-            if not value:
-                continue
-            path_ = Path(value)
-            item_dirs.append(path_ if path_.is_absolute() else root / path_)
+            if value:
+                item_dirs.append(value)
         return item_dirs
 
     def _write_index(self, root: Path, index_path: Path, item_dirs: list[Path]) -> None:
         index_path.parent.mkdir(parents=True, exist_ok=True)
-        lines = []
-        for item_dir in sorted(set(item_dirs)):
-            try:
-                lines.append(str(item_dir.relative_to(root)))
-            except ValueError:
-                lines.append(str(item_dir))
+        lines = [str(item_dir) for item_dir in item_dirs]
         tmp_path = index_path.with_name(
             f"{index_path.name}.{os.getpid()}.{id(self)}.tmp"
         )
         tmp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
         os.replace(tmp_path, index_path)
 
-    def _wait_for_index(self, root: Path, index_path: Path, lock_path: Path) -> list[Path] | None:
+    def _wait_for_index(self, root: Path, index_path: Path, lock_path: Path) -> list[str] | None:
         start_time = time.time()
         while True:
             if index_path.exists():
@@ -1002,12 +995,12 @@ class PreparedSeparationDataset(Dataset):
                 return None
             time.sleep(5)
 
-    def _scan_and_write_index(self, root: Path, index_path: Path) -> list[Path]:
+    def _scan_and_write_index(self, root: Path, index_path: Path) -> list[str]:
         scanned = self._scan_item_dirs(root)
         self._write_index(root, index_path, scanned)
-        return scanned
+        return [str(item_dir) for item_dir in scanned]
 
-    def _load_or_build_index(self, root: Path, index_path: Path) -> list[Path]:
+    def _load_or_build_index(self, root: Path, index_path: Path) -> list[str]:
         index_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = index_path.with_name(f"{index_path.name}.lock")
         while True:
@@ -1066,7 +1059,7 @@ class PreparedSeparationDataset(Dataset):
                 and str(item_dir / "accompaniment.mp3") in file_set
             ):
                 item_dirs.append(item_dir)
-        return sorted(set(item_dirs))
+        return item_dirs
 
     def _read_metadata(self, item_dir: Path) -> dict:
         metadata_path = item_dir / "metadata.json"
@@ -1192,7 +1185,7 @@ class PreparedSeparationDataset(Dataset):
     def get_item_for_task(self, index, task_id: str | None):
         while self.item_dirs:
             index = index % len(self.item_dirs)
-            item_dir = self.item_dirs[index]
+            item_dir = Path(self.item_dirs[index])
             if self._item_exceeds_duration_limit(item_dir):
                 self._skip_overlong_item(index, item_dir)
                 if not self.item_dirs:
@@ -1213,7 +1206,7 @@ class PreparedSeparationDataset(Dataset):
         task_ids = tuple(task_ids)
         while self.item_dirs:
             index = index % len(self.item_dirs)
-            item_dir = self.item_dirs[index]
+            item_dir = Path(self.item_dirs[index])
             if self._item_exceeds_duration_limit(item_dir):
                 self._skip_overlong_item(index, item_dir)
                 if not self.item_dirs:

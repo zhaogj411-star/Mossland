@@ -4,7 +4,6 @@ import torch
 from torch import nn
 from einops import reduce
 from vector_quantize_pytorch import ResidualVQ
-from vector_quantize_pytorch import vector_quantize_pytorch as vq_backend
 
 
 class ResidualVectorQuantize(nn.Module):
@@ -45,48 +44,6 @@ class ResidualVectorQuantize(nn.Module):
             ema_update=True,
             quantize_dropout=self.quantizer_dropout > 0.0,
         )
-
-    def set_distributed_sync(self, enabled: bool) -> None:
-        """Toggle lucidrains EMA codebook synchronization after DDP init."""
-        for layer in self.vq.layers:
-            codebook = getattr(layer, "_codebook", None)
-            if codebook is None:
-                continue
-
-            if hasattr(codebook, "sync_codebook"):
-                codebook.sync_codebook = bool(enabled)
-
-            if hasattr(codebook, "use_ddp"):
-                codebook.use_ddp = bool(enabled)
-
-            sync_kmeans = bool(enabled)
-            codebook.sample_fn = (
-                vq_backend.sample_vectors_distributed
-                if sync_kmeans
-                else vq_backend.batched_sample_vectors
-            )
-            codebook.replace_sample_fn = (
-                vq_backend.sample_vectors_distributed
-                if sync_kmeans
-                else vq_backend.batched_sample_vectors
-            )
-            codebook.kmeans_all_reduce_fn = (
-                vq_backend.distributed.all_reduce if sync_kmeans else vq_backend.noop
-            )
-            codebook.all_reduce_fn = (
-                vq_backend.distributed.all_reduce if bool(enabled) else vq_backend.noop
-            )
-
-    def initialized_codebook_count(self) -> int:
-        count = 0
-        for layer in self.vq.layers:
-            codebook = getattr(layer, "_codebook", None)
-            initted = getattr(codebook, "initted", None)
-            if initted is None:
-                count += 1
-            elif bool(initted.detach().cpu().item()):
-                count += 1
-        return count
 
     def _output_from_indices(self, indices: torch.Tensor):
         if indices.shape[-1] < self.n_codebooks:

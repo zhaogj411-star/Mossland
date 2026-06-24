@@ -68,6 +68,10 @@ def run_sharded(args: argparse.Namespace) -> None:
         ]
         if args.checkpoint_dir:
             command.extend(["--checkpoint-dir", args.checkpoint_dir])
+        if args.adapter_target:
+            command.extend(["--adapter-target", args.adapter_target])
+        if args.adapter_config:
+            command.extend(["--adapter-config", args.adapter_config])
         if args.device:
             command.extend(["--device", args.device])
         if args.quantized:
@@ -115,6 +119,8 @@ def main() -> None:
     parser.add_argument("--num-shards", type=int, default=0, help="Defaults to the number of GPUs.")
     parser.add_argument("--metrics-device", default="cuda", help="Device visible inside each shard process.")
     parser.add_argument("--checkpoint-dir", default=None, help="Optional Mossland checkpoint dir for sharded inference.")
+    parser.add_argument("--adapter-target", default=None, help="Optional custom prediction adapter as 'module:object'.")
+    parser.add_argument("--adapter-config", default=None, help="Optional JSON string or JSON file for custom adapters.")
     parser.add_argument("--device", default=None, help="Inference device visible inside each shard process.")
     parser.add_argument("--quantized", action="store_true", help="Use quantized latent path for generation.")
     parser.add_argument("--overwrite-predictions", action="store_true", help="Regenerate prediction wavs.")
