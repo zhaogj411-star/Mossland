@@ -72,6 +72,50 @@ agent-code/scripts/agent/check.sh all
 - `python`：存在根目录 `tests/` 或 `agent-code/tests/` 时运行 pytest。
 - `all`：按顺序运行以上 scope。
 
+## Energon in-flight shard 预索引
+
+当 `scripts.mossland_creator.prepare_energon_shards` 仍在往同一目录持续写 `shard_rankXX_*.tar` 时，`energon prepare` 不能直接扫描最新尾 shard；否则会在 tar 尚未写完时命中 `tarfile.ReadError: unexpected end of data` 或后续 `Shard ... has no samples`。
+
+先排除每个 rank 当前最新的 shard，再做非交互 prepare：
+
+```sh
+DATASET=/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/data/training_data/mossland-create-exp
+EXCLUDE_REGEX="$(
+python - <<'PY'
+from pathlib import Path
+import re
+
+root = Path("/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/data/training_data/mossland-create-exp")
+latest = {}
+for p in root.glob("shard_rank*.tar"):
+    m = re.fullmatch(r"shard_rank(\d+)_(\d+)\.tar", p.name)
+    if not m:
+        continue
+    rank = int(m.group(1))
+    idx = int(m.group(2))
+    latest[rank] = max(latest.get(rank, -1), idx)
+print("|".join(f"shard_rank{rank:02d}_{idx:06d}\\.tar" for rank, idx in sorted(latest.items())))
+PY
+)"
+
+energon prepare "$DATASET" \
+  --non-interactive \
+  --split-ratio 10,0,0 \
+  --sample-type CrudeWebdataset \
+  --force-overwrite \
+  --exclude "$EXCLUDE_REGEX"
+```
+
+如果只是先补 tar 索引、不需要立刻重写 `dataset.yaml`，可再加 `--tar-index-only`。更稳的做法是对“已封口 shard”的快照目录运行 `energon prepare`，避免 prepare 过程中又出现新的尾 shard。
+
+若上一次 `energon prepare` 中途失败，目录里可能残留 `.nv-meta/index.sqlite` 但没有 `.nv-meta/.info.json`。此时新版 `energon` 会把该目录误判成 filesystem dataset，并报：
+
+```text
+Filesystem datasets must be prepared using 'energon prepare-media'.
+```
+
+这种情况不要改用 `prepare-media`。正确处理是先把残留的 `.nv-meta/index.sqlite` 挪走，再重跑正常 `energon prepare`；已有的 `*.tar.idx` 可以保留复用。
+
 ## Mossland codec 训练短跑
 
 本机只有一张 RTX 4090 时，用以下命令验证 `scripts/train.py`、`mossland-codec.yaml`、训练 step、demo callback 和 checkpoint 保存链路。`scripts/train.py` 当前未启用 `rootutils.setup_root`，直接按文件路径执行时需要显式设置 `PYTHONPATH`。

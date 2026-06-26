@@ -1,0 +1,218 @@
+# @package _global_
+# ConvTrans RVQ 训练配置。
+# pretrain_ckpt_path 指向由 ckpt/mosslandcodec_rvq_0624_step42000 与
+# ckpt/mosslandcodec0623 临时合并出的可兼容初始化 ckpt，用于续训/迁移。
+
+project_name: mossland-codec-convtrans-rvq64
+checkpoint_monitor: loss/total
+tags: [audioCodec, mossland-codec-convtrans, multi-task, convtrans, rvq64]
+seed: null
+resume_from_ckpt: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec-convtrans-rvq64/runs/2026-06-25_12-00-51/checkpoints/last.ckpt
+# pretrain_ckpt_path: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/ckpt/mosslandcodec_convtrans_rvq_pretrain_0624_0623/checkpoint.ckpt
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 2000
+
+data:
+  _target_: scripts.data.datasets.Experiment_Dataset
+  dataset:
+    _target_: scripts.mossland_codec_convtrans.tasks.MosslandTaskDataset
+    dataset:
+      _target_: scripts.data.datasets.PreparedSeparationDataset
+      dirs: [/inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER]
+      # 2 chunks: fac*hop + hop*(2*spec_length - 1) = 2048 + 1024*63 = 66560。
+      sample_size: 66560
+      sample_rate: 44100
+      random_crop: true
+      num_channels: 2
+      strict: false
+      max_duration_seconds: 300
+      crops_per_file: 10
+      length: 10000000
+      index_file: /inspire/sj-ssd3/project/embodied-multimodality/public/Sonata/data/source_seperation/NETEASE_SPIDER/index.list
+    active_tasks: [reconstruct, separate_vocals, separate_accompaniment, super_resolution, mono_to_stereo]
+    task_weights:
+      reconstruct: 6.0
+      separate_vocals: 1
+      separate_accompaniment: 1
+      super_resolution: 1
+      mono_to_stereo: 1
+    sample_rate: 44100
+    low_sample_rate: [8000, 40000]
+  pin_memory: true
+  val_split: null
+  train_batch_size: 1
+  val_batch_size: 1
+  num_workers: 6
+  prefetch_factor: 2
+
+trainer:
+  log_every_n_steps: 10
+  gradient_clip_val: 0.2
+
+
+model:
+  # 主模型：Conv encoder + RVQ bottleneck + Transformer consistency decoder。
+  _target_: scripts.mossland_codec_convtrans.models.MosslandCodecConvTrans
+  # 使用 autocast/mixed precision 的推理/训练路径。
+  mixed_precision: true
+  # true 表示输入/输出为双声道；STFT 表示通道数为 4。
+  stereo: true
+  # 自回归解码时，上一段音频作为 prompt 时使用的噪声时间位置。
+  default_time_prompt: 0.4
+  # parallel decode 默认去噪步数。
+  default_denoising_steps_parallel: 5
+  # autoregressive decode 默认每个 chunk 的去噪步数。
+  default_denoising_steps_ar: 2
+  # STFT hop；RVQ token rate 由 4 * hop = 4096 samples/token 决定。
+  hop: 1024
+  # STFT window 相关系数；频率 bins = hop * (fac // 2) = 1024。
+  fac: 2
+  # 音频采样率；4096 samples/token 对应约 44100/4096=10.77 Hz。
+  sample_rate: 44100
+  # STFT 表示幅度重标定参数。
+  alpha_rescale: 0.65
+  # STFT 表示相位/虚部重标定参数。
+  beta_rescale: 0.34
+  # Transformer hidden size。
+  dim: 768
+  # attention 单头维度；heads = dim / head_dim = 6。
+  head_dim: 128
+  # Transformer FFN expansion ratio。
+  mlp_mult: 4
+  # Transformer 位置编码类型。
+  pos_emb: learned
+  # diffusion decoder Transformer 层数。
+  num_layers: 22
+  # pre-decoder Transformer 层数。
+  num_layers_encoder: 22
+  # sigma/task 条件 embedding 维度。
+  cond_channels: 768
+  # decoder 每个 chunk 使用 128 个 4-d latent，保持原 transformer 行为。
+  num_latents: 128
+  # 每个 chunk 额外追加的 learnable latent 数。
+  num_more_latents: 8
+  # decoder latent 的每-token 维度；64-d RVQ token 会拆成 16 个 4-d latent。
+  bottleneck_channels: 4
+  # RVQ 残差量化器数量。
+  rvq_num_quantizers: 32
+  # 每个 RVQ codebook 的大小；单个 code 范围为 [0, 4095]。
+  rvq_codebook_size: 4096
+  # null 表示 codebook embedding dim 使用 rvq_token_dim=64。
+  rvq_codebook_dim: null
+  # lucidrains ResidualVQ 的 quantizer dropout 概率配置。
+  rvq_quantizer_dropout: 1.0
+  # RVQ EMA codebook decay。
+  rvq_decay: 0.99
+  # 首次使用时用 kmeans 初始化 codebook。
+  rvq_kmeans_init: true
+  # kmeans 初始化迭代次数。
+  rvq_kmeans_iters: 10
+  # EMA dead code 替换阈值。
+  rvq_threshold_ema_dead_code: 2
+  # spectrogram decoder/pre-decoder frontend 的基础通道数。
+  frontend_base_channels: 64
+  # frontend 各 stage 通道倍率，最终 64*12=768 对齐 Transformer dim。
+  frontend_multipliers_list: [1, 2, 4, 12]
+  # diffusion decoder frontend 每个 stage 的 ConvBlock 数。
+  frontend_layers_list: [3, 3, 3, 1]
+  # pre-decoder frontend 每个 stage 的 ConvBlock 数。
+  frontend_encoder_layers_list: [3, 3, 3, 1]
+  # frontend 下采样模式：0=频率/时间各 /2，1=仅频率 /4。
+  frontend_freq_downsample_list: [0, 1, 0]
+  # 一个 codec chunk 的 STFT 帧数；32 frames * 1024 hop。
+  spec_length: 32
+  # diffusion/consistency sigma 最小值。
+  sigma_min: 0.002
+  # diffusion/consistency sigma 最大值。
+  sigma_max: 80.0
+  # EDM/consistency 预条件中的数据标准差。
+  sigma_data: 0.5
+  # Karras sigma schedule 的 rho 参数。
+  rho: 7.0
+  # encode distribute 时单次最大 batch。
+  max_batch_size_encode: 64
+  # decode distribute 时单次最大 batch。
+  max_batch_size_decode: 32
+  # sigma 相关重标定系数。
+  sigma_rescale: 0.8
+  # RVQ 连续 bottleneck 维度：每个时间步直接量化 64-d token。
+  rvq_token_dim: 64
+  # 每个 32-frame chunk 有 8 个 RVQ token，即 4 frames/token = 4096 samples/token。
+  rvq_tokens_per_chunk: 8
+  # Conv encoder 基础通道数，来自 mosslandcodec0623。
+  conv_base_channels: 128
+  # Conv encoder 五个 stage 的 ResBlock 数，来自 mosslandcodec0623 的 layers_list_encoder。
+  conv_layers_list_encoder: [2, 3, 4, 4, 3]
+  # Conv encoder 五个 stage 的通道倍率，来自 mosslandcodec0623 的 multipliers_list。
+  conv_multipliers_list: [1, 2, 4, 4, 4]
+  # 是否在对应 stage 开启 attention；后 3 个 stage 开启。
+  conv_attention_list_encoder: [0, 0, 1, 1, 1]
+  # Conv encoder 下采样模式：1=仅频率 /4，0=频率/时间各 /2；两个 0 => 时间 /4。
+  conv_freq_downsample_list: [1, 0, 0, 1]
+  # Conv encoder 1D bottleneck 内部宽度，来自 mosslandcodec0623。
+  conv_bottleneck_base_channels: 1024
+  # Conv encoder 1D bottleneck ResBlock 层数，来自 mosslandcodec0623。
+  conv_num_bottleneck_layers: 9
+  # latent head 固定为本地 GroupNorm + SiLU + Conv1d + tanh 输出 64-d @ T/4。
+  # Conv encoder 期望频率 bins 的一半；conv_hop*2 = 1024。
+  conv_hop: 512
+  # 对输入频率维加可学习 gain。
+  conv_frequency_scaling: true
+  # Conv encoder attention head 数。
+  conv_heads: 8
+  # Conv encoder ResBlock 使用 normalization。
+  conv_normalization: true
+  # 2D 特征转 1D bottleneck 前先做 normalize。
+  conv_pre_normalize_2d_to_1d: true
+  # 下采样前做 normalize。
+  conv_pre_normalize_downsampling_encoder: true
+  # Conv encoder dropout。
+  conv_dropout_rate: 0.0
+  # ResBlock dropout 相关的最小维度阈值。
+  conv_min_res_dropout: 16
+  # 任务条件集合，来自 mosslandcodec0623。
+  task_names: [reconstruct, separate_vocals, separate_accompaniment, super_resolution, mono_to_stereo]
+  task_embedding_init_std: 0.02
+
+wrapper:
+  _target_: scripts.mossland_codec_convtrans.wrapper.MosslandCodecTrainingWrapper
+  use_ema: true
+  ema_beta: 0.9999
+  learning_rate: 5e-5
+  weight_decay: 0.0
+  optimizer_name: adamw
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 100
+  lr_schedule_total_steps: 1000000
+  consistency_step: 0.1
+  consistency_step_schedule: exponential
+  consistency_step_total_steps: 1000000
+  consistency_step_end_exp: 2.0
+  sigma_sampling: lognormal
+  lognormal_mean: -1.1
+  lognormal_std: 2.0
+  consistency_loss_delta: 0.00054
+  consistency_min_sigma_delta: 0.001
+  # decoder 训练窗口就是 2 chunks；输入也按 2 chunks 准备，避免多余裁剪。
+  train_input_chunks: 2
+  index_data_every_step: null
+  fail_on_nonfinite: true
+  rvq_commitment_weight: 0.0
+  rvq_codebook_weight: 0.0
+  rvq_distill_weight: 0.0
+  rvq_latent_train_prob: 0.1
+  rvq_detach_encoder: true
+  train_n_quantizers: null
+  train_n_quantizers_choices: [8, 16, 32]
+  rvq_log_n_quantizers_choices: [8, 16, 32]
+
+callbacks:
+  demo_callback:
+    _target_: scripts.mossland_codec_convtrans.wrapper.MosslandCodecTrainingCallback
+    demo_dir: ${paths.output_dir}/demos
+    demo_num: 2
+    demo_every: 2000
+    sample_rate: 44100
+    use_ema: true
+    silence_seconds: 0.25
+    demo_n_quantizers_choices: [8, 16, 32]

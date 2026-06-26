@@ -1,0 +1,97 @@
+# @package _global_
+
+project_name: mossland-creator-music-dit-flow-matching
+checkpoint_monitor: loss/total
+tags: [mossland-creator, music-dit, energon, same, umt5, flow-matching]
+seed: 42
+resume_from_ckpt: null
+pretrain_ckpt_path: null
+checkpoint_every_n_train_steps: 2000
+
+trainer:
+  devices: 1
+  strategy: auto
+  precision: bf16-mixed
+  # max_steps: 200000
+  max_epochs: 10000000
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: null
+
+data:
+  _target_: scripts.mossland_creator.music_dit.data.energon_datamodule.MosslandCreatorEnergonDataModule
+  path: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/data/training_data/mossland-create-exp
+  train_batch_size: 16
+  val_batch_size: 2
+  num_workers: 4
+  seq_length: null
+  max_duration_seconds: 300
+  patch_t: 1
+  text_embedding_padding_size: 3500
+  text_dropout: 0.1
+  context_dropout: 0.8
+  shuffle_buffer_size: 256
+  max_samples_per_sequence: 1
+  train_split: train
+  val_split: null
+  use_train_split_for_val: false
+  val_limit: null
+  max_abs_latent: 1000.0
+  pos_dim: 1
+  loader_prefetch_factor: 2
+  task_specs:
+    - {name: text2music, weight: 2.0, target_key: mixture}
+    - {name: vocaltrack2music, weight: 0.5, target_key: mixture}
+    - {name: acc2music, weight: 0.5, target_key: mixture}
+
+model:
+  _target_: scripts.mossland_creator.music_dit.models.music_dit.MusicDiT
+  latent_channels: 256
+  patch_t: 1
+  crossattn_emb_size: 768
+  hidden_size: 1152
+  num_layers: 18
+  num_attention_heads: 18
+  use_context_conditioning: true
+  sigma_data: 0.87
+  max_frames: 4096
+
+wrapper:
+  _target_: scripts.mossland_creator.music_dit.wrapper.MusicDiTTrainingWrapper
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  optimizer_name: adamw
+  lr_schedule: cosine_decay
+  lr_warmup_steps: 1000
+  lr_schedule_total_steps: 200000
+  p_mean: -1.2
+  p_std: 1.2
+  objective_name: flow_matching
+  sigma_data: 0.87
+  flow_matching_estimator_target: conditional_vector_field
+  flow_matching_time_min: 1.0e-5
+  flow_matching_time_max: 1.0
+  flow_matching_sigma_start: 1.0
+  flow_matching_sigma_end: 1.0e-4
+  fail_on_nonfinite: true
+
+callbacks:
+  demo_callback:
+    _target_: scripts.mossland_creator.music_dit.demo_callback.MusicDiTFlowDemoCallback
+    demo_dir: ${paths.output_dir}/demos
+    dataset_path: ${data.path}
+    demo_num: 1
+    demo_every: 1000
+    demo_start_step: 1
+    duration_seconds: ${data.max_duration_seconds}
+    num_steps: 32
+    guidance_scale: 1.0
+    demo_seed: 1234
+    codec_variant: same-l
+    split_part: ${data.train_split}
+    text_embedding_padding_size: ${data.text_embedding_padding_size}
+    patch_t: ${data.patch_t}
+    max_abs_latent: ${data.max_abs_latent}
+    save_format: mp3
