@@ -13,7 +13,7 @@ tags:
 - rvq64
 - packed-rvq
 seed: null
-resume_from_ckpt: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec-0617-rvq64/runs/2026-06-23_17-20-24/checkpoints/last.ckpt
+resume_from_ckpt: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec-0617-rvq64/runs/2026-06-23_20-44-11/checkpoints/last.ckpt
 pretrain_ckpt_path: null
 checkpoint_every_n_train_steps: 2000
 data:
@@ -137,8 +137,12 @@ wrapper:
   consistency_loss_delta: 0.00054
   consistency_min_sigma_delta: 0.001
   train_input_chunks: 3
-  latent_time_shift_prob: 1.0
+  latent_time_shift_prob: 0.0
   latent_time_shift_max_tokens: 7
+  encoder_shift_equiv_weight: 0.05
+  encoder_shift_equiv_prob: 1
+  encoder_shift_equiv_max_tokens: 7
+  encoder_shift_equiv_detach_teacher: true
   index_data_every_step: null
   fail_on_nonfinite: true
   rvq_commitment_weight: 0.0

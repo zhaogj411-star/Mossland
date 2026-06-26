@@ -4,28 +4,41 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
+import os
+import sys
 
 import torch
 import torchaudio
 
-from scripts.MOSS_Audio_Tokenizer.modeling_moss_audio_tokenizer import (
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from scripts.MOSS_Audio_Tokenizer.modeling_moss_audio_tokenizer import (  # noqa: E402
     MossAudioTokenizerModel,
 )
 
+DEFAULT_CHECKPOINT_DIR = os.path.join(
+    REPO_ROOT,
+    "checkpoints",
+    "OpenMOSS-Team",
+    "MOSS-Audio-Tokenizer-v2",
+)
+DEFAULT_INPUT = os.path.join(REPO_ROOT, "tmp", "34078087", "mixture.mp3")
+DEFAULT_OUTPUT = os.path.join(REPO_ROOT, "tmp", "34078087", "mixture_reconstructed.wav")
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parents[1]
-DEFAULT_CHECKPOINT_DIR = REPO_ROOT / "checkpoints" / "OpenMOSS-Team" / "MOSS-Audio-Tokenizer-v2"
-DEFAULT_INPUT = REPO_ROOT / "tmp" / "34078087" / "mixture.mp3"
-DEFAULT_OUTPUT = REPO_ROOT / "tmp" / "34078087" / "mixture_reconstructed.wav"
+
+def absolute_path(value: str) -> str:
+    return os.path.abspath(os.path.expanduser(value))
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--checkpoint-dir", type=absolute_path, default=DEFAULT_CHECKPOINT_DIR)
+    parser.add_argument("--input", type=absolute_path, default=DEFAULT_INPUT)
+    parser.add_argument("--output", type=absolute_path, default=DEFAULT_OUTPUT)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num-quantizers", type=int, default=None)
     parser.add_argument(
@@ -43,8 +56,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_audio(path: Path, target_sr: int, channels: int) -> torch.Tensor:
-    wav, sr = torchaudio.load(str(path))
+def load_audio(path: str, target_sr: int, channels: int) -> torch.Tensor:
+    wav, sr = torchaudio.load(path)
     if wav.numel() == 0:
         raise ValueError(f"Input audio is empty: {path}")
     if sr != target_sr:
@@ -58,17 +71,17 @@ def load_audio(path: Path, target_sr: int, channels: int) -> torch.Tensor:
     return wav.clamp(-1.0, 1.0)
 
 
-def save_audio(path: Path, wav: torch.Tensor, sample_rate: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save_audio(path: str, wav: torch.Tensor, sample_rate: int) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     wav = wav.detach().cpu().float().clamp(-1.0, 1.0)
-    torchaudio.save(str(path), wav, sample_rate=sample_rate)
+    torchaudio.save(path, wav, sample_rate=sample_rate)
 
 
 def main() -> None:
     args = parse_args()
-    if not args.checkpoint_dir.exists():
+    if not os.path.isdir(args.checkpoint_dir):
         raise FileNotFoundError(f"Checkpoint directory not found: {args.checkpoint_dir}")
-    if not args.input.exists():
+    if not os.path.isfile(args.input):
         raise FileNotFoundError(f"Input audio not found: {args.input}")
 
     load_kwargs = {"low_cpu_mem_usage": True}

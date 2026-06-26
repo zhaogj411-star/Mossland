@@ -15,9 +15,9 @@ sys.path.insert(0, REPO_ROOT)
 EncoderDecoder = importlib.import_module("scripts.mossland-codec.inference").EncoderDecoder
 
 
-DEFAULT_CKPT = os.path.join(REPO_ROOT, "ckpt/mosslandcodec_rvq_0624_step36000")
+DEFAULT_CKPT = os.path.join(REPO_ROOT, "ckpt/mossland-codec-convtrans-rvq64-step2000")
 # DEFAULT_CKPT = os.path.join(REPO_ROOT, "ckpt/mosslandcodec_rvq_0623")
-DEFAULT_INPUT_AUDIO ='/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/data/Ummet Ozcan,FrogMonster 蛙蛙,Karra - Remember The Summer (feat. Karra).mp3'
+DEFAULT_INPUT_AUDIO ='/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/tmp/data/许嵩 - 如约而至.mp3'
 DEFAULT_OUTPUT_DIR = os.path.join(REPO_ROOT, "tmp/mossland-codec-infer-shift")
 
 
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-seconds", type=float, default=0.0)
     parser.add_argument("--duration-seconds", type=float, default=120.0)
     parser.add_argument("--mode", choices=["parallel", "autoregressive"], default="parallel")
-    parser.add_argument("--denoising-steps", type=int, default=8)
+    parser.add_argument("--denoising-steps", type=int, default=1)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--format", default="mp3", choices=["mp3", "wav"])
     return parser.parse_args()
@@ -135,7 +135,7 @@ def main() -> None:
     )
 
     continuous_latents = codec.encode(audio, discrete=False, preprocess_on_gpu=True)
-    # continuous_latents = continuous_latents[:,3:-5]
+    # continuous_latents = continuous_latents[:,4:-4]
     print_shape("continuous_latents", continuous_latents)
     decode_and_save(codec, "continuous", continuous_latents, args)
 
@@ -150,7 +150,7 @@ def main() -> None:
             preprocess_on_gpu=True,
             n_quantizers=n_quantizers,
         )
-        # codes = codes[:,3:-5]
+        # codes = codes[:,4:-4]
         print_shape(f"rvq{n_quantizers}_codes", codes)
         decode_and_save(codec, f"rvq{n_quantizers}", codes, args)
 

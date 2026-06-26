@@ -9,6 +9,7 @@ import lightning as pl
 import torch
 import torchaudio
 from ema_pytorch import EMA
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from .models import MosslandCodecTransformer
@@ -120,6 +121,10 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         train_input_chunks: int = 2,
         latent_time_shift_prob: float = 0.0,
         latent_time_shift_max_tokens: int | None = None,
+        encoder_shift_equiv_weight: float = 0.0,
+        encoder_shift_equiv_prob: float = 0.0,
+        encoder_shift_equiv_max_tokens: int | None = None,
+        encoder_shift_equiv_detach_teacher: bool = True,
         index_data_every_step: int | None = None,
         rvq_sync_debug_every_step: int | None = None,
         fail_on_nonfinite: bool = True,
@@ -177,6 +182,18 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         self.latent_time_shift_max_tokens = int(latent_time_shift_max_tokens)
         if self.latent_time_shift_max_tokens < 0:
             raise ValueError("latent_time_shift_max_tokens must be >= 0")
+        self.encoder_shift_equiv_weight = float(encoder_shift_equiv_weight)
+        if self.encoder_shift_equiv_weight < 0.0:
+            raise ValueError("encoder_shift_equiv_weight must be >= 0")
+        self.encoder_shift_equiv_prob = float(encoder_shift_equiv_prob)
+        if not 0.0 <= self.encoder_shift_equiv_prob <= 1.0:
+            raise ValueError("encoder_shift_equiv_prob must be in [0, 1]")
+        if encoder_shift_equiv_max_tokens is None:
+            encoder_shift_equiv_max_tokens = max(0, self.model.rvq_tokens_per_chunk - 1)
+        self.encoder_shift_equiv_max_tokens = int(encoder_shift_equiv_max_tokens)
+        if self.encoder_shift_equiv_max_tokens < 0:
+            raise ValueError("encoder_shift_equiv_max_tokens must be >= 0")
+        self.encoder_shift_equiv_detach_teacher = bool(encoder_shift_equiv_detach_teacher)
         self.index_data_every_step = _normalize_positive_int_or_none(
             index_data_every_step,
             "index_data_every_step",
@@ -561,17 +578,29 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         }
         return loss, metrics, predicted, target
 
-    def _select_latent_time_shift(self, latents: torch.Tensor) -> int:
+    def _select_latent_time_shifts(self, latents: torch.Tensor) -> torch.Tensor:
         tokens_per_chunk = self.model.rvq_tokens_per_chunk
         total_tokens = (latents.shape[-2] // self.model.num_latents) * tokens_per_chunk
         target_tokens = 2 * tokens_per_chunk
         max_shift = max(0, total_tokens - target_tokens)
         max_shift = min(max_shift, self.latent_time_shift_max_tokens)
+        batch_size = latents.shape[0]
         if max_shift <= 0 or self.latent_time_shift_prob <= 0.0:
-            return 0
-        if self.latent_time_shift_prob < 1.0 and torch.rand((), device=latents.device) >= self.latent_time_shift_prob:
-            return 0
-        return int(torch.randint(0, max_shift + 1, (), device=latents.device).item())
+            return torch.zeros(batch_size, dtype=torch.long, device=latents.device)
+        shifts = torch.randint(
+            0,
+            max_shift + 1,
+            (batch_size,),
+            device=latents.device,
+            dtype=torch.long,
+        )
+        if self.latent_time_shift_prob < 1.0:
+            apply_mask = (
+                torch.rand(batch_size, device=latents.device)
+                < self.latent_time_shift_prob
+            )
+            shifts = torch.where(apply_mask, shifts, torch.zeros_like(shifts))
+        return shifts
 
     def _apply_latent_time_shift(
         self,
@@ -586,43 +615,186 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
                 f"rvq_tokens_per_chunk={tokens_per_chunk}"
             )
         frames_per_token = self.model.spec_length // tokens_per_chunk
-        shift_tokens = self._select_latent_time_shift(latents)
+        shift_tokens = self._select_latent_time_shifts(latents)
         shift_frames = shift_tokens * frames_per_token
         target_tokens = 2 * tokens_per_chunk
         target_frames = 2 * self.model.spec_length
 
         packed = self.model.pack_rvq_tokens(latents)
-        if packed.shape[-1] < shift_tokens + target_tokens:
+        if packed.shape[-1] < int(shift_tokens.max().item()) + target_tokens:
             raise ValueError(
                 f"not enough latent tokens for 2-chunk shifted window: "
-                f"tokens={packed.shape[-1]}, shift={shift_tokens}, need={target_tokens}"
+                f"tokens={packed.shape[-1]}, max_shift={int(shift_tokens.max().item())}, "
+                f"need={target_tokens}"
             )
-        if representation.shape[-1] < shift_frames + target_frames:
+        if representation.shape[-1] < int(shift_frames.max().item()) + target_frames:
             raise ValueError(
                 f"not enough representation frames for 2-chunk shifted window: "
-                f"frames={representation.shape[-1]}, shift={shift_frames}, need={target_frames}"
+                f"frames={representation.shape[-1]}, max_shift={int(shift_frames.max().item())}, "
+                f"need={target_frames}"
             )
 
-        packed = packed[..., shift_tokens : shift_tokens + target_tokens]
+        packed = torch.cat(
+            [
+                item[..., int(shift.item()) : int(shift.item()) + target_tokens].unsqueeze(0)
+                for item, shift in zip(packed, shift_tokens, strict=True)
+            ],
+            dim=0,
+        )
         shifted_latents = self.model.unpack_rvq_tokens(packed)
-        shifted_representation = representation[
-            ..., shift_frames : shift_frames + target_frames
-        ]
+        shifted_representation = torch.cat(
+            [
+                item[..., int(shift.item()) : int(shift.item()) + target_frames].unsqueeze(0)
+                for item, shift in zip(representation, shift_frames, strict=True)
+            ],
+            dim=0,
+        )
         metrics = {
             "latent/time_shift_tokens": torch.tensor(
-                float(shift_tokens),
+                float(shift_tokens.float().mean().item()),
                 device=representation.device,
             ),
             "latent/time_shift_frames": torch.tensor(
-                float(shift_frames),
+                float(shift_frames.float().mean().item()),
                 device=representation.device,
             ),
             "latent/time_shift_applied": torch.tensor(
-                1.0 if shift_tokens > 0 else 0.0,
+                float((shift_tokens > 0).float().mean().item()),
                 device=representation.device,
             ),
+            "latent/time_shift_tokens_max": shift_tokens.max().float(),
         }
         return shifted_representation, shifted_latents, metrics
+
+    def _crop_decoder_training_window(
+        self,
+        representation: torch.Tensor,
+        latents: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Use the original chunk-aligned 2-chunk window for decoder training."""
+        target_frames = 2 * self.model.spec_length
+        target_tokens = 2 * self.model.rvq_tokens_per_chunk
+        if representation.shape[-1] < target_frames:
+            raise ValueError(
+                f"not enough representation frames for decoder window: "
+                f"frames={representation.shape[-1]}, need={target_frames}"
+            )
+        packed = self.model.pack_rvq_tokens(latents)
+        if packed.shape[-1] < target_tokens:
+            raise ValueError(
+                f"not enough latent tokens for decoder window: "
+                f"tokens={packed.shape[-1]}, need={target_tokens}"
+            )
+        representation = representation[..., :target_frames]
+        latents = self.model.unpack_rvq_tokens(packed[..., :target_tokens])
+        return representation, latents
+
+    def _select_encoder_shift_equiv_shifts(
+        self,
+        src_representation: torch.Tensor,
+    ) -> torch.Tensor:
+        tokens_per_chunk = self.model.rvq_tokens_per_chunk
+        if self.model.spec_length % tokens_per_chunk != 0:
+            raise ValueError(
+                f"spec_length={self.model.spec_length} must be divisible by "
+                f"rvq_tokens_per_chunk={tokens_per_chunk}"
+            )
+        total_frames = src_representation.shape[-1]
+        target_frames = 2 * self.model.spec_length
+        frames_per_token = self.model.spec_length // tokens_per_chunk
+        max_shift = max(0, (total_frames - target_frames) // frames_per_token)
+        max_shift = min(max_shift, self.encoder_shift_equiv_max_tokens)
+        batch_size = src_representation.shape[0]
+        if (
+            self.encoder_shift_equiv_weight <= 0.0
+            or self.encoder_shift_equiv_prob <= 0.0
+            or max_shift <= 0
+        ):
+            return torch.zeros(batch_size, dtype=torch.long, device=src_representation.device)
+        shifts = torch.randint(
+            1,
+            max_shift + 1,
+            (batch_size,),
+            device=src_representation.device,
+            dtype=torch.long,
+        )
+        if self.encoder_shift_equiv_prob < 1.0:
+            apply_mask = (
+                torch.rand(batch_size, device=src_representation.device)
+                < self.encoder_shift_equiv_prob
+            )
+            shifts = torch.where(apply_mask, shifts, torch.zeros_like(shifts))
+        return shifts
+
+    def _encoder_shift_equiv_loss(
+        self,
+        src_representation: torch.Tensor,
+        packed_reference: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Align shifted encoder outputs to the same absolute-time packed tokens."""
+        zero = src_representation.new_zeros(())
+        shift_tokens = self._select_encoder_shift_equiv_shifts(src_representation)
+        tokens_per_chunk = self.model.rvq_tokens_per_chunk
+        frames_per_token = self.model.spec_length // tokens_per_chunk
+        target_tokens = 2 * tokens_per_chunk
+        target_frames = 2 * self.model.spec_length
+        shift_frames = shift_tokens * frames_per_token
+        applied = shift_tokens > 0
+        metrics = {
+            "loss/encoder_shift_equiv": zero.detach(),
+            "encoder_shift/equiv_weight": torch.tensor(
+                self.encoder_shift_equiv_weight,
+                device=src_representation.device,
+            ),
+            "encoder_shift/tokens": shift_tokens.float().mean(),
+            "encoder_shift/tokens_max": shift_tokens.max().float(),
+            "encoder_shift/frames": shift_frames.float().mean(),
+            "encoder_shift/applied": applied.float().mean(),
+        }
+        if self.encoder_shift_equiv_weight <= 0.0 or not bool(applied.any().item()):
+            return zero, metrics
+        if packed_reference.shape[-1] < int(shift_tokens.max().item()) + target_tokens:
+            raise ValueError(
+                f"not enough reference latent tokens for encoder shift equivariance: "
+                f"tokens={packed_reference.shape[-1]}, "
+                f"max_shift={int(shift_tokens.max().item())}, need={target_tokens}"
+            )
+        if src_representation.shape[-1] < int(shift_frames.max().item()) + target_frames:
+            raise ValueError(
+                f"not enough representation frames for encoder shift equivariance: "
+                f"frames={src_representation.shape[-1]}, "
+                f"max_shift={int(shift_frames.max().item())}, need={target_frames}"
+            )
+
+        shifted_representation = torch.cat(
+            [
+                item[..., int(shift.item()) : int(shift.item()) + target_frames].unsqueeze(0)
+                for item, shift in zip(src_representation, shift_frames, strict=True)
+            ],
+            dim=0,
+        )
+        shifted_encoded = self.model.encode_bottleneck(
+            shifted_representation,
+            quantize=False,
+        )
+        packed_shifted = self.model.pack_rvq_tokens(shifted_encoded.continuous)
+        packed_target = torch.cat(
+            [
+                item[..., int(shift.item()) : int(shift.item()) + target_tokens].unsqueeze(0)
+                for item, shift in zip(packed_reference, shift_tokens, strict=True)
+            ],
+            dim=0,
+        )
+        if self.encoder_shift_equiv_detach_teacher:
+            packed_target = packed_target.detach()
+        per_item_loss = F.mse_loss(
+            packed_shifted.float(),
+            packed_target.float(),
+            reduction="none",
+        ).mean(dim=(1, 2))
+        loss = per_item_loss[applied].mean()
+        metrics["loss/encoder_shift_equiv"] = loss.detach()
+        return loss, metrics
 
     def training_step(self, batch, batch_idx):
         self._log_current_lr()
@@ -677,10 +849,31 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
                 quantize=False,
             )
             latents = encoded.latents
-        target_representation, latents, shift_metrics = self._apply_latent_time_shift(
-            target_representation,
-            latents,
+        packed_reference = (
+            rvq_encoded.packed_continuous
+            if rvq_encoded is not None and rvq_encoded.packed_continuous is not None
+            else self.model.pack_rvq_tokens(latents)
         )
+        encoder_shift_loss, encoder_shift_metrics = self._encoder_shift_equiv_loss(
+            src_representation,
+            packed_reference,
+        )
+        if self.latent_time_shift_prob > 0.0:
+            target_representation, latents, shift_metrics = self._apply_latent_time_shift(
+                target_representation,
+                latents,
+            )
+        else:
+            target_representation, latents = self._crop_decoder_training_window(
+                target_representation,
+                latents,
+            )
+            shift_metrics = {
+                "latent/time_shift_tokens": torch.zeros((), device=target_representation.device),
+                "latent/time_shift_frames": torch.zeros((), device=target_representation.device),
+                "latent/time_shift_applied": torch.zeros((), device=target_representation.device),
+                "latent/time_shift_tokens_max": torch.zeros((), device=target_representation.device),
+            }
         self._assert_finite("latents", latents, info)
         features = self.model.pre_decoder_forward(latents)
         for idx, feature in enumerate(features):
@@ -703,6 +896,8 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
             )
             if self.rvq_commitment_weight or self.rvq_codebook_weight or self.rvq_distill_weight:
                 loss = loss + rvq_loss
+        if self.encoder_shift_equiv_weight:
+            loss = loss + self.encoder_shift_equiv_weight * encoder_shift_loss
         self._assert_finite("loss", loss, info)
 
         self.log("loss/total", loss, prog_bar=True, on_step=True, on_epoch=False, sync_dist=False)
@@ -754,6 +949,8 @@ class MosslandCodecTrainingWrapper(CodecTrainingBase):
         for name, value in metrics.items():
             self.log(name, value, prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
         for name, value in shift_metrics.items():
+            self.log(name, value, prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
+        for name, value in encoder_shift_metrics.items():
             self.log(name, value, prog_bar=False, on_step=True, on_epoch=False, sync_dist=False)
         return loss
 
