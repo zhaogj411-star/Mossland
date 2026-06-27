@@ -1300,6 +1300,7 @@ class MosslandCodecConvTrans(nn.Module):
         task_id: str = "reconstruct",
         dont_quantize: bool = True,
         n_quantizers: int | None = None,
+        denoising_steps: int | None = None,
     ):
         src = self.prepare_audio_batch(src)
         representation = self.to_representation_encoder(src)
@@ -1309,15 +1310,10 @@ class MosslandCodecConvTrans(nn.Module):
             n_quantizers=n_quantizers,
         )
         latents = encoded.latents
-        features = self.pre_decoder_forward(latents)
-        noise = torch.randn_like(representation) * self.sigma_max
-        generated = self.decoder_forward(
-            noise,
+        generated = self.decode_parallel(
             latents,
-            features=features,
-            sigma_left=self.sigma_max,
-            sigma_right=self.sigma_max,
-            output="both",
+            denoising_steps=denoising_steps,
+            max_batch_size=self.max_batch_size_decode,
             task_id=task_id,
         )
         waveform = self.to_waveform(generated[..., : representation.shape[-1]])

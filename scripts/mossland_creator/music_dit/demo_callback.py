@@ -190,6 +190,7 @@ class MusicDiTFlowDemoCallback(pl.Callback):
         self.save_format = save_format
         self.last_demo_step = -1
         self._codec: Optional[SAMECodec] = None
+        self._demo_iterator = None
 
     def _should_run_demo(self, global_step: int) -> bool:
         if self.demo_every <= 0 or global_step < self.demo_start_step:
@@ -233,6 +234,15 @@ class MusicDiTFlowDemoCallback(pl.Callback):
             repeat=False,
         )
         return get_savable_loader(dataset, prefetch_factor=2)
+
+    def _next_demo_batch(self) -> dict:
+        if self._demo_iterator is None:
+            self._demo_iterator = iter(self._demo_loader())
+        try:
+            return next(self._demo_iterator)
+        except StopIteration:
+            self._demo_iterator = iter(self._demo_loader())
+            return next(self._demo_iterator)
 
     def _codec_for_device(self, device: torch.device) -> SAMECodec:
         device_name = str(device)
@@ -304,7 +314,7 @@ class MusicDiTFlowDemoCallback(pl.Callback):
         module.model.eval()
         self._clear_cuda_cache()
         try:
-            demo_batch = next(iter(self._demo_loader()))
+            demo_batch = self._next_demo_batch()
             codec = self._codec_for_device(module.device)
             sampler = MusicFlowMatchingEulerSampler(
                 module.model,

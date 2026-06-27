@@ -122,6 +122,61 @@ def denormalize_patch(x, alpha_rescale=0.65, beta_rescale=0.34):
     x = x/beta_rescale
     return torch.sign(x)*(x.abs()**(1./alpha_rescale))
 
+def _rescale_compute_dtype(dtype: torch.dtype) -> torch.dtype:
+    if dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return dtype
+
+def _validate_complex_rescale(alpha_rescale: float, beta_rescale: float) -> tuple[float, float]:
+    alpha = float(alpha_rescale)
+    beta = float(beta_rescale)
+    if alpha <= 0:
+        raise ValueError(f"alpha_rescale must be positive, got {alpha}")
+    if beta <= 0:
+        raise ValueError(f"beta_rescale must be positive, got {beta}")
+    return alpha, beta
+
+def _split_realimag_pairs(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if x.shape[-3] % 2 != 0:
+        raise ValueError(f"Expected even real/imag channel count, got {x.shape[-3]}")
+    pairs = x.shape[-3] // 2
+    paired = x.reshape(*x.shape[:-3], pairs, 2, *x.shape[-2:])
+    return paired[..., 0, :, :], paired[..., 1, :, :]
+
+def _merge_realimag_pairs(real: torch.Tensor, imag: torch.Tensor, target_shape: torch.Size) -> torch.Tensor:
+    paired = torch.stack((real, imag), dim=-3)
+    return paired.reshape(target_shape)
+
+def normalize_complex_realimag(x, alpha_rescale=0.65, beta_rescale=0.34):
+    """Apply Music2Latent complex-magnitude compression to real/imag channels.
+
+    This is equivalent to beta * abs(c) ** alpha * exp(1j * angle(c)), while
+    staying in real tensors for devices with limited complex arithmetic support.
+    """
+    alpha, beta = _validate_complex_rescale(alpha_rescale, beta_rescale)
+    real, imag = _split_realimag_pairs(x)
+    compute_dtype = _rescale_compute_dtype(real.dtype)
+    real_f = real.to(compute_dtype)
+    imag_f = imag.to(compute_dtype)
+    magnitude = torch.sqrt(real_f.square() + imag_f.square())
+    eps = 1e-12 if compute_dtype == torch.float32 else 1e-24
+    scale = beta * magnitude.clamp_min(eps).pow(alpha - 1.0)
+    scale = torch.where(magnitude > 0, scale, torch.zeros_like(scale))
+    return _merge_realimag_pairs(real_f * scale, imag_f * scale, x.shape).to(dtype=x.dtype)
+
+def denormalize_complex_realimag(x, alpha_rescale=0.65, beta_rescale=0.34):
+    """Invert normalize_complex_realimag on real/imag channels."""
+    alpha, beta = _validate_complex_rescale(alpha_rescale, beta_rescale)
+    real, imag = _split_realimag_pairs(x)
+    compute_dtype = _rescale_compute_dtype(real.dtype)
+    real_f = real.to(compute_dtype)
+    imag_f = imag.to(compute_dtype)
+    magnitude = torch.sqrt(real_f.square() + imag_f.square())
+    eps = 1e-12 if compute_dtype == torch.float32 else 1e-24
+    scale = (beta ** (-1.0 / alpha)) * magnitude.clamp_min(eps).pow((1.0 / alpha) - 1.0)
+    scale = torch.where(magnitude > 0, scale, torch.zeros_like(scale))
+    return _merge_realimag_pairs(real_f * scale, imag_f * scale, x.shape).to(dtype=x.dtype)
+
 def wv2complex(wv, hop_size=256, fac=4):
     X = stft(wv, hop_size=hop_size, fac=fac, device=wv.device)
     return X[:,:hop_size*(fac//2),:]
@@ -135,7 +190,7 @@ def wv2realimag(wv, hop_size=256, fac=4, alpha_rescale=0.65, beta_rescale=0.34):
         wv = torch.cat(wv_ls, 0)
     X = wv2complex(wv, hop_size, fac)
     X = torch.stack((torch.real(X),torch.imag(X)), -3)
-    X = normalize_patch(X, alpha_rescale=alpha_rescale, beta_rescale=beta_rescale)
+    X = normalize_complex_realimag(X, alpha_rescale=alpha_rescale, beta_rescale=beta_rescale)
     if stereo:
         X_ls = torch.chunk(X, channels, 0)
         X = torch.cat(X_ls, -3)
@@ -154,7 +209,7 @@ def realimag2wv(x, hop_size=256, fac=4, alpha_rescale=0.65, beta_rescale=0.34):
         channels = len(x_ls)
         x = torch.cat(x_ls, 0)
     x = torch.nn.functional.pad(x, (0,0,0,1))
-    x = denormalize_patch(x, alpha_rescale=alpha_rescale, beta_rescale=beta_rescale)
+    x = denormalize_complex_realimag(x, alpha_rescale=alpha_rescale, beta_rescale=beta_rescale)
     real,imag = torch.chunk(x, 2, -3)
     X = torch.complex(real.squeeze(-3),imag.squeeze(-3))
     wv = istft(X, fac=fac, hop_size=hop_size, device=X.device).clamp(-1.,1.)

@@ -1,3 +1,4 @@
+import inspect
 import sys
 import types
 
@@ -34,7 +35,7 @@ vq_stub.vector_quantize_pytorch = types.SimpleNamespace(
 )
 sys.modules.setdefault("vector_quantize_pytorch", vq_stub)
 
-from scripts.mossland_codec_convtrans.models import ConvEncoder
+from scripts.mossland_codec_convtrans.models import ConvEncoder, MosslandCodecConvTrans
 
 
 def _small_conv_encoder(**overrides):
@@ -88,3 +89,10 @@ def test_convtrans_bottleneck_small_init_stays_bounded():
     assert torch.isfinite(continuous).all()
     assert pre_tanh.abs().sum() > 0
     assert continuous.abs().max() <= 1.0 + 1e-6
+
+
+def test_convtrans_demo_generation_uses_full_decode_schedule():
+    source = inspect.getsource(MosslandCodecConvTrans.generate_waveform)
+
+    assert "self.decode_parallel(" in source
+    assert "self.decoder_forward(" not in source

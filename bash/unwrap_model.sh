@@ -1,10 +1,10 @@
 
 python -m scripts.unwrap experiment=mossland-codec-convtrans-rvq-raw \
- experiment_ckpt_path=/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec-convtrans-rvq64-raw/runs/2026-06-25_16-34-20/checkpoints/last.ckpt \
- output_path=./ckpt/mossland-codec-convtrans-rvq64-raw_step36000 \
+ experiment_ckpt_path=/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/logs/mossland-codec-convtrans-rvq64-raw/runs/2026-06-26_12-20-25/checkpoints/last.ckpt \
+ output_path=./ckpt/mossland-codec-convtrans-rvq64-raw_step12000 \
  deepspeed=false \
- export_ema=false \
- load_strict=false
+ export_ema=true \
+ load_strict=true
 # resume_from_ckpt=/home/gjzhao/workspace2024/heartstrings-version4/logs/vae_113/runs/2024-09-24_13-16-53/checkpoints/last.ckpt
 
 # python -m scripts.unwrap experiment=compose_music_net_ultra \

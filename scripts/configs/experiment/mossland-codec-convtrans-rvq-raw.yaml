@@ -8,8 +8,10 @@ tags: [audioCodec, mossland-codec-convtrans, raw-audio, convtrans, rvq64]
 seed: null
 # 删除分离任务后 task embedding 形状改变，
 # 不能 strict resume 旧 5-task checkpoint。
+# 注意：2026-06-27 修正了 STFT real/imag 表征到 Music2Latent complex-magnitude 口径。
+# 旧 checkpoint 使用 per-real/imag power 表征，不能继续 resume。
 resume_from_ckpt: null
-pretrain_ckpt_path: /inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/ckpt/mossland-codec-convtrans-rvq64-raw_step36000/checkpoint.ckpt
+pretrain_ckpt_path: null 
 checkpoint_every_n_train_steps: 2000
 
 data:

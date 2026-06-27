@@ -8,6 +8,7 @@ from scripts.mossland_creator.music_dit.data.taskencoder import (
     cook_music,
 )
 from scripts.mossland_creator.music_dit.diffusion import MusicFlowMatchingEulerSampler
+from scripts.mossland_creator.music_dit.demo_callback import MusicDiTFlowDemoCallback
 from scripts.mossland_creator.music_dit.models.music_dit import MusicDiT
 from scripts.mossland_creator.music_dit.wrapper import MusicDiTTrainingWrapper
 
@@ -168,3 +169,24 @@ def test_music_flow_matching_euler_sampler_smoke():
 
     assert out.shape == (2, 32, 8)
     assert torch.isfinite(out).all()
+
+
+def test_music_dit_flow_demo_callback_advances_demo_loader():
+    callback = MusicDiTFlowDemoCallback(
+        demo_dir="unused",
+        dataset_path="unused",
+        demo_num=1,
+    )
+    loader_batches = [
+        [{"idx": 0}, {"idx": 1}],
+        [{"idx": 2}],
+    ]
+
+    def demo_loader():
+        return iter(loader_batches.pop(0))
+
+    callback._demo_loader = demo_loader
+
+    assert callback._next_demo_batch()["idx"] == 0
+    assert callback._next_demo_batch()["idx"] == 1
+    assert callback._next_demo_batch()["idx"] == 2

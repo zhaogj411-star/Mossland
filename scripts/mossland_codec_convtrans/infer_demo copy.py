@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import torchaudio
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
@@ -17,9 +18,10 @@ sys.path.insert(0, REPO_ROOT)
 from scripts.mossland_codec_convtrans.inference import EncoderDecoder  # noqa: E402
 
 
-DEFAULT_CKPT = '/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/ckpt/mossland-codec-convtrans-rvq64-step2000'
-DEFAULT_INPUT_AUDIO = os.path.join(REPO_ROOT, "tmp/data/许嵩 - 如约而至.mp3")
+DEFAULT_CKPT = '/inspire/sj-ssd3/project/embodied-multimodality/public/zhaoguojie/Mossland/ckpt/mossland-codec-convtrans-rvq64-raw_step12000'
+DEFAULT_INPUT_AUDIO = os.path.join(REPO_ROOT, "tmp/data/music/许嵩 - 如约而至.mp3")
 DEFAULT_OUTPUT_DIR = os.path.join(REPO_ROOT, "tmp/mossland-codec-convtrans-infer-demo")
+PAD_FRAMES = 32
 
 
 def parse_args() -> argparse.Namespace:
@@ -199,7 +201,8 @@ def main() -> None:
     )
 
     continuous_latents = codec.encode(audio, discrete=False, preprocess_on_gpu=True)
-    continuous_latents = continuous_latents[:,3:-5]
+    # continuous_latents = continuous_latents[:,3:-5]
+    continuous_latents = F.pad(continuous_latents, (0, PAD_FRAMES), value=0.0)
     print_shape("continuous_latents", continuous_latents)
     decode_and_save(codec, "continuous", continuous_latents, args)
 
@@ -223,7 +226,7 @@ def main() -> None:
             preprocess_on_gpu=True,
             n_quantizers=n_quantizers,
         )
-        codes = codes[:,3:-5]
+        codes = F.pad(codes, (0, PAD_FRAMES), value=0)
         print_shape(f"rvq{n_quantizers}_codes", codes)
         decode_and_save(codec, f"rvq{n_quantizers}", codes, args)
 
